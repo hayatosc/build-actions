@@ -85,19 +85,25 @@ jobs:
       env:
         DSH_BUILD_CLIENT_PROFILE: official
       run: pnpm exec tsx scripts/build-exe-for-python-sdk.ts --targets=${{ matrix.target }}
-    - name: Verify Workspace client deployment and repair only missing package
+    - name: Verify and repair missing declared Web UI runtime controllers
       shell: bash
       env:
         BUILD_TARGET: ${{ matrix.target }}
       run: "node <<'JS'\nconst fs=require('node:fs'),path=require('node:path');\nconst name='@deepseek-ai/dsh-api-workspace-controller';\n\
-        const root='python/sdk-runtime/src/deepseek_harness_runtime/runtime/node/node_modules/'+name;\nconst paths=['package.json','lib/client.js'];\n\
-        const missing=paths.filter(f=>!fs.existsSync(path.join(root,f)));\nconst result={package:name,missing,repair:missing.length?'direct-workspace-dependency':'none'};\n\
-        console.log(JSON.stringify(result));fs.writeFileSync('deployment-repair.json',JSON.stringify(result,null,2));\nif(missing.length){\n\
+        const root='python/sdk-runtime/src/deepseek_harness_runtime/runtime/node/node_modules/'+name;\nconst supplemental=['settings-controller','account-controller'].map(short=>({name:'@deepseek-ai/dsh-api-'+short,source:'packages/api/'+short+'/package.json'}));\n\
+        const base=path.dirname(root);\nconst missingSupplemental=supplemental.filter(p=>!fs.existsSync(path.join(base,p.name.split('/')[1],'package.json'))||!fs.existsSync(path.join(base,p.name.split('/')[1],'lib/index.js')));\n\
+        const paths=['package.json','lib/client.js'];\nconst missing=paths.filter(f=>!fs.existsSync(path.join(root,f)));\n\
+        const result={package:name,missing,supplementalMissing:missingSupplemental.map(p=>p.name),repair:missing.length||missingSupplemental.length?'direct-workspace-dependency':'none'};\n\
+        console.log(JSON.stringify(result));fs.writeFileSync('deployment-repair.json',JSON.stringify(result,null,2));\nif(missing.length||missingSupplemental.length){\n\
         \ const source=JSON.parse(fs.readFileSync('packages/api/workspace-controller/package.json','utf8'));\n if(source.name!==name||source.dsh?.client?.platform!=='web')throw\
         \ Error('Unexpected source manifest');\n const file='python/sdk-runtime/package.json';const m=JSON.parse(fs.readFileSync(file,'utf8'));\n\
-        \ if(m.dependencies[name])throw Error('Direct dependency already present; refuse speculative repair');\n const peer='@deepseek-ai/dsh-host-directory-picker';if(source.peerDependencies?.[peer]!=='workspace:*')throw\
-        \ Error('Required peer declaration changed');const peerSource=JSON.parse(fs.readFileSync('packages/host/directory-picker/package.json','utf8'));if(peerSource.name!==peer)throw\
-        \ Error('Unexpected peer source');m.dependencies[name]='workspace:*';m.dependencies[peer]='workspace:*';fs.writeFileSync(file,JSON.stringify(m,null,2)+'\\\
+        \ if(missing.length&&m.dependencies[name])throw Error('Direct dependency already present; refuse speculative repair');\n\
+        \ const peer='@deepseek-ai/dsh-host-directory-picker';if(source.peerDependencies?.[peer]!=='workspace:*')throw Error('Required\
+        \ peer declaration changed');const peerSource=JSON.parse(fs.readFileSync('packages/host/directory-picker/package.json','utf8'));if(peerSource.name!==peer)throw\
+        \ Error('Unexpected peer source');if(missing.length){m.dependencies[name]='workspace:*';m.dependencies[peer]='workspace:*';}for(const\
+        \ p of missingSupplemental){\n const source=JSON.parse(fs.readFileSync(p.source,'utf8'));const web=JSON.parse(fs.readFileSync('packages/bundle/web-app/package.json','utf8'));\n\
+        \ if(source.name!==p.name||web.dependencies[p.name]!=='workspace:*'||m.dependencies[p.name])throw Error('Unexpected\
+        \ supplemental dependency');\n m.dependencies[p.name]='workspace:*';\n}\nfs.writeFileSync(file,JSON.stringify(m,null,2)+'\\\
         n');\n fs.writeFileSync('repair-needed','yes');\n}\nJS\nif [ -f repair-needed ]; then\n  pnpm install --lockfile-only\
         \ --ignore-scripts\n  pnpm install --frozen-lockfile --ignore-scripts\n  pnpm exec tsx scripts/build-exe-for-python-sdk.ts\
         \ --targets=\"$BUILD_TARGET\" --skip-build\nfi\nnode <<'JS'\nconst fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{createRequire}=require('node:module'),{execFileSync}=require('node:child_process');\n\
@@ -106,8 +112,12 @@ jobs:
         const m=JSON.parse(fs.readFileSync(manifest,'utf8'));\nif(m.name!==name||m.dsh?.client?.platform!=='web')throw Error('Deployed\
         \ client manifest mismatch');\nconst client=path.join(path.dirname(manifest),'lib/client.js');if(!fs.existsSync(client))throw\
         \ Error('Deployed browser bundle absent');\nconst sha=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');\n\
-        const result=JSON.parse(fs.readFileSync('deployment-repair.json','utf8'));\nresult.verified=true;result.verifiedAt=new\
-        \ Date().toISOString();result.source=process.env.SOURCE_SHA;\nresult.resolvedManifest=path.relative(base,manifest);result.resolvedEntry=path.relative(base,entry);\n\
+        const result=JSON.parse(fs.readFileSync('deployment-repair.json','utf8'));\nresult.supplementalResolved=['settings-controller','account-controller'].map(short=>{\n\
+        \ const n='@deepseek-ai/dsh-api-'+short;const f=req.resolve(n+'/package.json');const m=JSON.parse(fs.readFileSync(f,'utf8'));if(m.name!==n)throw\
+        \ Error('Supplemental manifest mismatch');const entry=req.resolve(n);if(path.relative(base,f).startsWith('..')||path.relative(base,entry).startsWith('..'))throw\
+        \ Error('Resolution escaped deployed closure');const deployedSha=sha(entry),sourceSha=sha('packages/api/'+short+'/lib/index.js');if(deployedSha!==sourceSha)throw\
+        \ Error('Supplemental host bundle differs');return {name:n,entry:path.relative(base,entry),manifestSha256:sha(f),deployedSha,sourceSha};\n\
+        });\nresult.verified=true;result.verifiedAt=new Date().toISOString();result.source=process.env.SOURCE_SHA;\nresult.resolvedManifest=path.relative(base,manifest);result.resolvedEntry=path.relative(base,entry);\n\
         result.hashes={sdkManifest:sha('python/sdk-runtime/package.json'),lockfile:sha('pnpm-lock.yaml'),deployedClient:sha(client),sourceClient:sha('packages/api/workspace-controller/lib/client.js')};\n\
         if(result.hashes.deployedClient!==result.hashes.sourceClient)throw Error('Deployed client differs from official generated\
         \ bundle');\nconst patch=execFileSync('git',['diff','--','python/sdk-runtime/package.json','pnpm-lock.yaml'],{encoding:'utf8'});\n\
@@ -205,7 +215,7 @@ jobs:
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
-        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080','--patch',patch],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
         \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
         .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
@@ -239,14 +249,15 @@ jobs:
         \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
         \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:'isolated\
         \ explicit CI fixture; default OS detection not asserted',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
-        \ }catch(e){if(lastPage){try{diagnostics.body=scrub((await lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await\
-        \ lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
+        \ }catch(e){diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
+        \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await\
+        \ lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
         \ window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__,entryIds:(window.__DSH_BOOT__?.entries||[]).map(e=>e.id)}));}catch{}}throw\
         \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
         \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
         \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
         '@ | Set-Content harness-smoke.cjs -Encoding utf8\nnode harness-smoke.cjs\nif ($LASTEXITCODE -ne 0) { throw 'Direct\
         \ EXE verification failed' }"
     - name: Verify POSIX HTTP assets and available Chrome UI twice
@@ -262,7 +273,7 @@ jobs:
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
-        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080','--patch',patch],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
         \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
         .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
@@ -296,14 +307,15 @@ jobs:
         \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
         \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:'isolated\
         \ explicit CI fixture; default OS detection not asserted',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
-        \ }catch(e){if(lastPage){try{diagnostics.body=scrub((await lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await\
-        \ lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
+        \ }catch(e){diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
+        \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await\
+        \ lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
         \ window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__,entryIds:(window.__DSH_BOOT__?.entries||[]).map(e=>e.id)}));}catch{}}throw\
         \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
         \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
         \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
         JS\nnode harness-smoke.cjs"
     - name: Diagnose official deployed Node carrier after SDK UI failure
       if: failure() && matrix.platform == 'linux-x64' && hashFiles('harness-smoke.cjs') != ''
