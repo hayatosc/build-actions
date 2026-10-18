@@ -202,121 +202,169 @@ jobs:
     - name: Install isolated official test tooling
       shell: bash
       run: npm install --prefix "$RUNNER_TEMP/harness-test-tools" --no-audit --no-fund playwright-core@1.61.1
-    - name: Verify direct Windows EXE browser handoff and workspace twice
+    - name: Verify direct EXE, durable onboarding, restart and default Windows workspace
       if: runner.os == 'Windows'
       shell: pwsh
       run: "@'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
         const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
         const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
-        const scrub=s=>String(s).replace(/@deepseek-ai\\/([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\\
-        /\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\/-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
+        const yaml=require('js-yaml');\nfunction noticePersisted(home){const file=path.join(home,'profiles/web/cordis.patch.yml');if(!fs.existsSync(file))return\
+        \ false;const entries=yaml.load(fs.readFileSync(file,'utf8'));return Array.isArray(entries)&&entries.some(e=>e.id==='ui-settings-general'&&e.config?.welcomeNoticeVersion==='2026-09-28.1');}\n\
+        function settingsErrors(value,output){if(!value||typeof value!=='object')return;if(typeof value.code==='string'&&/settings[-/](conflict|rejected)/.test(value.code))output.push({code:value.code,message:scrub(value.message||''),namespace:value.details?.ns});for(const\
+        \ v of Object.values(value))if(v&&typeof v==='object')settingsErrors(v,output);}\nconst scrub=s=>String(s).replace(/@deepseek-ai\\\
+        /([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\\
+        /-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
         \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}}]));const\
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
-        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=(windows?3:2);trial++){\n const activeHome=trial===3?path.join(process.env.RUNNER_TEMP,'harness-default-home'):home;fs.mkdirSync(activeHome,{recursive:true});\n\
+        \ if(trial===2&&!noticePersisted(activeHome)&&platform!=='linux-arm64')throw Error('Notice acknowledgement\
+        \ absent before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
-        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
-        .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
-        \ if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek\
-        \ browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
+        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\\
+        /127\\.0\\.0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await\
+        \ new Promise(r=>setTimeout(r,1000))}\n if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let\
+        \ i=0;i<300&&!output.includes('deepseek browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
         \ browser: native Windows handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await\
-        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const\
-        \ html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"\
-        ']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw Error('No frontend assets');for(const\
-        \ asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw Error('Unexpected external asset');const a=await\
-        \ api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw Error('Missing frontend asset')}\n let\
-        \ ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await\
-        \ chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({locale:'en-US'});lastPage=page;let\
-        \ pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[]};page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
+        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP\
+        \ not 200');const html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"\
+        ']+\\.(?:js|css)(?:\\?[^\"']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw\
+        \ Error('No frontend assets');for(const asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw\
+        \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
+        \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
+        \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
+        \ page=await browser.newPage({locale:'en-US'});lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
+        \ response=>{if(response.url().startsWith('http://127.0.0.1:3080/')&&response.headers()['content-type']?.includes('application/json')){try{settingsErrors(await\
+        \ response.json(),diagnostics.settingsErrors)}catch{}}});page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
         \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
         \ page.locator('body').innerText()).trim().length;\n phase='app-controls';await page.waitForFunction(()=>document.querySelector('button,input,textarea,[role=button]')\
-        \ && /deepseek|new chat|settings|sign in|log in|\u65B0\u4F1A\u8BDD|\u8BBE\u7F6E|\u767B\u5F55/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
-        \ Error('Frontend exceptions');\n phase='workspace-onboarding';\n for(let i=0;i<60;i++){\n  if(await page.getByRole('dialog').count()===0&&await\
-        \ page.locator('[data-composer-input][contenteditable=\"true\"]').first().isVisible())break;\n  const cont=page.getByRole('button',{name:'Continue',exact:true}),later=page.getByRole('button',{name:'Configure\
-        \ later',exact:true}),key=page.getByRole('button',{name:'Add API Key',exact:true});\n  if(await cont.isVisible())await\
-        \ cont.click();else if(await later.isVisible())await later.click();else if(await key.isVisible())await key.click();\n\
-        \  await page.waitForTimeout(500);\n }\n phase='workspace-composer';const input=page.locator('[data-composer-input][contenteditable=\"\
-        true\"]').first();await input.waitFor({state:'visible',timeout:30000});await input.fill('Unsubmitted workspace verification');if((await\
-        \ input.textContent())!=='Unsubmitted workspace verification')throw Error('Composer edit failed');await input.fill('');if((await\
-        \ input.textContent()).trim()!=='')throw Error('Composer draft not cleared');if(pageErrors)throw Error('Frontend exceptions\
-        \ after workspace interaction');\n if(!fs.statSync(path.join(fixture,'deepseek-harness','default-workspace')).isDirectory())throw\
-        \ Error('Isolated workspace not created');\n if(await page.getByRole('alert').filter({hasText:'Unable to create default\
-        \ workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const clean=new\
-        \ URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
-        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n evidence.push({trial,entry:windows?'direct\
-        \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
-        \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:'isolated\
-        \ explicit CI fixture; default OS detection not asserted',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
-        \ }catch(e){diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
+        \ && /deepseek|new chat|settings|sign in|log in|新会话|设置|登录/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
+        \ Error('Frontend exceptions');\n phase='workspace-onboarding';\n const notice=page.getByRole('dialog',{name:'Preview\
+        \ Notice',exact:true});\n if(trial!==2){\n  await notice.waitFor({state:'visible',timeout:60000});\n  //\
+        \ One click only. The enabled state is awaited by Playwright; repeated clicks race a saving/reloaded dialog.\n\
+        \  await notice.getByRole('button',{name:'Continue',exact:true}).click({timeout:60000});\n  await notice.waitFor({state:'hidden',timeout:90000});\n\
+        \ }else if(await notice.isVisible())throw Error('Persisted notice reappeared after restart');\n phase='verify-notice-persistence';\n\
+        \ if(!noticePersisted(activeHome))throw Error('Notice acknowledgement was not saved in the active profile');\n\
+        \ const start=page.getByRole('dialog',{name:'Get started',exact:true});\n await start.waitFor({state:'visible',timeout:60000});\n\
+        \ await start.getByRole('button',{name:'Add API Key',exact:true}).click();\n const setup=page.getByRole('dialog',{name:'Add\
+        \ an API key to get started',exact:true});\n await setup.waitFor({state:'visible',timeout:60000});\n await\
+        \ setup.getByRole('button',{name:'Configure later',exact:true}).click();\n await setup.waitFor({state:'hidden',timeout:60000});\n\
+        \ await page.waitForFunction(()=>document.querySelector('#root')&&!document.querySelector('#root').inert&&document.querySelectorAll('[role=\"\
+        dialog\"]').length===0,null,{timeout:60000});\n if(await notice.isVisible())throw Error('Acknowledged notice\
+        \ reappeared');\n phase='workspace-composer';const input=page.locator('[data-composer-input][contenteditable=\"\
+        true\"]').first();await input.waitFor({state:'visible',timeout:30000});await input.fill('Unsubmitted workspace\
+        \ verification');\n await page.waitForFunction(()=>document.querySelector('[data-composer-input][contenteditable=\"\
+        true\"]')?.textContent==='Unsubmitted workspace verification',null,{timeout:10000});\n await input.fill('');await\
+        \ page.waitForFunction(()=>document.querySelector('[data-composer-input][contenteditable=\"true\"]')?.textContent.trim()==='',null,{timeout:10000});if(pageErrors)throw\
+        \ Error('Frontend exceptions after workspace interaction');\n const workspaceState=JSON.parse(fs.readFileSync(path.join(activeHome,'storages/workspace.json'),'utf8'));\n\
+        \ const workspaces=Object.values(workspaceState.tables.workspaces);\n if(workspaces.length!==1||!fs.statSync(workspaces[0].path).isDirectory()||path.basename(workspaces[0].path)!=='default-workspace')throw\
+        \ Error('Durable default workspace missing');\n if(trial!==3&&!fs.statSync(path.join(fixture,'deepseek-harness','default-workspace')).isDirectory())throw\
+        \ Error('Isolated workspace not created');\n if(trial===3&&fs.existsSync(path.join(activeHome,'cordis.patch.yml')))throw\
+        \ Error('Default-home verification unexpectedly has a home override');\n if(await page.getByRole('alert').filter({hasText:'Unable\
+        \ to create default workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const\
+        \ clean=new URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
+        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n\
+        \ evidence.push({trial,entry:windows?'direct EXE with no arguments from unrelated working directory':'explicit\
+        \ web CLI',browserHandoff:windows?'native ShellExecuteExW success observed; UI separately verified in Chrome':'not\
+        \ tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
+        \ OS default Documents discovery; no home override':'isolated explicit CI fixture',noticeAcknowledgement:platform==='linux-arm64'?'not-browser-tested':trial===2?'persisted\
+        \ across process restart':'saved through real UI',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
+        \ }catch(e){diagnostics.noticePersisted=noticePersisted(activeHome);diagnostics.startupErrors=output.split('\\\
+        n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
         \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await\
         \ lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
         \ window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__,entryIds:(window.__DSH_BOOT__?.entries||[]).map(e=>e.id)}));}catch{}}throw\
         \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
-        \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
+        \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await\
+        \ new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
-        \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
-        '@ | Set-Content harness-smoke.cjs -Encoding utf8\nnode harness-smoke.cjs\nif ($LASTEXITCODE -ne 0) { throw 'Direct\
-        \ EXE verification failed' }"
-    - name: Verify POSIX HTTP assets and available Chrome UI twice
+        \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n\
+        })().catch(e=>{const diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        '@ | Set-Content harness-smoke.cjs -Encoding utf8\nnode harness-smoke.cjs\nif ($LASTEXITCODE -ne 0) { throw\
+        \ 'Direct EXE verification failed' }\n"
+    - name: Verify POSIX assets, durable onboarding and workspace restart
       if: runner.os != 'Windows'
       shell: bash
       run: "cat > harness-smoke.cjs <<'JS'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
         const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
         const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
-        const scrub=s=>String(s).replace(/@deepseek-ai\\/([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\\
-        /\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\/-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
+        const yaml=require('js-yaml');\nfunction noticePersisted(home){const file=path.join(home,'profiles/web/cordis.patch.yml');if(!fs.existsSync(file))return\
+        \ false;const entries=yaml.load(fs.readFileSync(file,'utf8'));return Array.isArray(entries)&&entries.some(e=>e.id==='ui-settings-general'&&e.config?.welcomeNoticeVersion==='2026-09-28.1');}\n\
+        function settingsErrors(value,output){if(!value||typeof value!=='object')return;if(typeof value.code==='string'&&/settings[-/](conflict|rejected)/.test(value.code))output.push({code:value.code,message:scrub(value.message||''),namespace:value.details?.ns});for(const\
+        \ v of Object.values(value))if(v&&typeof v==='object')settingsErrors(v,output);}\nconst scrub=s=>String(s).replace(/@deepseek-ai\\\
+        /([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\\
+        /-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
         \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}}]));const\
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
-        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=(windows?3:2);trial++){\n const activeHome=trial===3?path.join(process.env.RUNNER_TEMP,'harness-default-home'):home;fs.mkdirSync(activeHome,{recursive:true});\n\
+        \ if(trial===2&&!noticePersisted(activeHome)&&platform!=='linux-arm64')throw Error('Notice acknowledgement\
+        \ absent before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
-        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
-        .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
-        \ if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek\
-        \ browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
+        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\\
+        /127\\.0\\.0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await\
+        \ new Promise(r=>setTimeout(r,1000))}\n if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let\
+        \ i=0;i<300&&!output.includes('deepseek browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
         \ browser: native Windows handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await\
-        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const\
-        \ html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"\
-        ']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw Error('No frontend assets');for(const\
-        \ asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw Error('Unexpected external asset');const a=await\
-        \ api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw Error('Missing frontend asset')}\n let\
-        \ ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await\
-        \ chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({locale:'en-US'});lastPage=page;let\
-        \ pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[]};page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
+        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP\
+        \ not 200');const html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"\
+        ']+\\.(?:js|css)(?:\\?[^\"']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw\
+        \ Error('No frontend assets');for(const asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw\
+        \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
+        \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
+        \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
+        \ page=await browser.newPage({locale:'en-US'});lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
+        \ response=>{if(response.url().startsWith('http://127.0.0.1:3080/')&&response.headers()['content-type']?.includes('application/json')){try{settingsErrors(await\
+        \ response.json(),diagnostics.settingsErrors)}catch{}}});page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
         \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
         \ page.locator('body').innerText()).trim().length;\n phase='app-controls';await page.waitForFunction(()=>document.querySelector('button,input,textarea,[role=button]')\
-        \ && /deepseek|new chat|settings|sign in|log in|\u65B0\u4F1A\u8BDD|\u8BBE\u7F6E|\u767B\u5F55/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
-        \ Error('Frontend exceptions');\n phase='workspace-onboarding';\n for(let i=0;i<60;i++){\n  if(await page.getByRole('dialog').count()===0&&await\
-        \ page.locator('[data-composer-input][contenteditable=\"true\"]').first().isVisible())break;\n  const cont=page.getByRole('button',{name:'Continue',exact:true}),later=page.getByRole('button',{name:'Configure\
-        \ later',exact:true}),key=page.getByRole('button',{name:'Add API Key',exact:true});\n  if(await cont.isVisible())await\
-        \ cont.click();else if(await later.isVisible())await later.click();else if(await key.isVisible())await key.click();\n\
-        \  await page.waitForTimeout(500);\n }\n phase='workspace-composer';const input=page.locator('[data-composer-input][contenteditable=\"\
-        true\"]').first();await input.waitFor({state:'visible',timeout:30000});await input.fill('Unsubmitted workspace verification');if((await\
-        \ input.textContent())!=='Unsubmitted workspace verification')throw Error('Composer edit failed');await input.fill('');if((await\
-        \ input.textContent()).trim()!=='')throw Error('Composer draft not cleared');if(pageErrors)throw Error('Frontend exceptions\
-        \ after workspace interaction');\n if(!fs.statSync(path.join(fixture,'deepseek-harness','default-workspace')).isDirectory())throw\
-        \ Error('Isolated workspace not created');\n if(await page.getByRole('alert').filter({hasText:'Unable to create default\
-        \ workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const clean=new\
-        \ URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
-        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n evidence.push({trial,entry:windows?'direct\
-        \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
-        \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:'isolated\
-        \ explicit CI fixture; default OS detection not asserted',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
-        \ }catch(e){diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
+        \ && /deepseek|new chat|settings|sign in|log in|新会话|设置|登录/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
+        \ Error('Frontend exceptions');\n phase='workspace-onboarding';\n const notice=page.getByRole('dialog',{name:'Preview\
+        \ Notice',exact:true});\n if(trial!==2){\n  await notice.waitFor({state:'visible',timeout:60000});\n  //\
+        \ One click only. The enabled state is awaited by Playwright; repeated clicks race a saving/reloaded dialog.\n\
+        \  await notice.getByRole('button',{name:'Continue',exact:true}).click({timeout:60000});\n  await notice.waitFor({state:'hidden',timeout:90000});\n\
+        \ }else if(await notice.isVisible())throw Error('Persisted notice reappeared after restart');\n phase='verify-notice-persistence';\n\
+        \ if(!noticePersisted(activeHome))throw Error('Notice acknowledgement was not saved in the active profile');\n\
+        \ const start=page.getByRole('dialog',{name:'Get started',exact:true});\n await start.waitFor({state:'visible',timeout:60000});\n\
+        \ await start.getByRole('button',{name:'Add API Key',exact:true}).click();\n const setup=page.getByRole('dialog',{name:'Add\
+        \ an API key to get started',exact:true});\n await setup.waitFor({state:'visible',timeout:60000});\n await\
+        \ setup.getByRole('button',{name:'Configure later',exact:true}).click();\n await setup.waitFor({state:'hidden',timeout:60000});\n\
+        \ await page.waitForFunction(()=>document.querySelector('#root')&&!document.querySelector('#root').inert&&document.querySelectorAll('[role=\"\
+        dialog\"]').length===0,null,{timeout:60000});\n if(await notice.isVisible())throw Error('Acknowledged notice\
+        \ reappeared');\n phase='workspace-composer';const input=page.locator('[data-composer-input][contenteditable=\"\
+        true\"]').first();await input.waitFor({state:'visible',timeout:30000});await input.fill('Unsubmitted workspace\
+        \ verification');\n await page.waitForFunction(()=>document.querySelector('[data-composer-input][contenteditable=\"\
+        true\"]')?.textContent==='Unsubmitted workspace verification',null,{timeout:10000});\n await input.fill('');await\
+        \ page.waitForFunction(()=>document.querySelector('[data-composer-input][contenteditable=\"true\"]')?.textContent.trim()==='',null,{timeout:10000});if(pageErrors)throw\
+        \ Error('Frontend exceptions after workspace interaction');\n const workspaceState=JSON.parse(fs.readFileSync(path.join(activeHome,'storages/workspace.json'),'utf8'));\n\
+        \ const workspaces=Object.values(workspaceState.tables.workspaces);\n if(workspaces.length!==1||!fs.statSync(workspaces[0].path).isDirectory()||path.basename(workspaces[0].path)!=='default-workspace')throw\
+        \ Error('Durable default workspace missing');\n if(trial!==3&&!fs.statSync(path.join(fixture,'deepseek-harness','default-workspace')).isDirectory())throw\
+        \ Error('Isolated workspace not created');\n if(trial===3&&fs.existsSync(path.join(activeHome,'cordis.patch.yml')))throw\
+        \ Error('Default-home verification unexpectedly has a home override');\n if(await page.getByRole('alert').filter({hasText:'Unable\
+        \ to create default workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const\
+        \ clean=new URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
+        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n\
+        \ evidence.push({trial,entry:windows?'direct EXE with no arguments from unrelated working directory':'explicit\
+        \ web CLI',browserHandoff:windows?'native ShellExecuteExW success observed; UI separately verified in Chrome':'not\
+        \ tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
+        \ OS default Documents discovery; no home override':'isolated explicit CI fixture',noticeAcknowledgement:platform==='linux-arm64'?'not-browser-tested':trial===2?'persisted\
+        \ across process restart':'saved through real UI',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
+        \ }catch(e){diagnostics.noticePersisted=noticePersisted(activeHome);diagnostics.startupErrors=output.split('\\\
+        n').filter(l=>/error|failed|unknown option/i.test(l)).slice(-15).map(scrub);if(lastPage){try{diagnostics.body=scrub((await\
         \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await\
         \ lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof\
         \ window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__,entryIds:(window.__DSH_BOOT__?.entries||[]).map(e=>e.id)}));}catch{}}throw\
         \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
-        \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
+        \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await\
+        \ new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
-        \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
-        JS\nnode harness-smoke.cjs"
+        \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n\
+        })().catch(e=>{const diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',errorMessage:scrub(e?.message||''),diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        JS\nnode harness-smoke.cjs\n"
     - name: Diagnose official deployed Node carrier after SDK UI failure
       if: failure() && matrix.platform == 'linux-x64' && hashFiles('harness-smoke.cjs') != ''
       shell: bash
@@ -440,3 +488,4 @@ jobs:
 
         python -c ''import json,os;x=json.load(open(os.environ["RUNNER_TEMP"]+"/published-release.json"));assert len(x["assets"])==10;assert
         all(a["size"]>0 for a in x["assets"]);print(x["url"])'' '
+
