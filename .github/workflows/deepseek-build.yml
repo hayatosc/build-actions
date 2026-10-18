@@ -68,18 +68,32 @@ jobs:
       if: runner.os == 'Windows'
       shell: bash
       run: "python - <<'PY'\nfrom pathlib import Path\np=Path('python/sdk-runtime/runtime-bootstrap.mjs');s=p.read_text()\n\
-        needle=\"  const { runCli } = await import('@deepseek-ai/dsh/lib/bin.js')\"\nassert s.count(needle)==1\ns=s.replace(needle,\"\
-        \"\"  // Downstream Windows double-click entry; explicit CLI and subprocess routes remain unchanged.\n  const doubleClick\
-        \ = process.platform === 'win32' && isSea() && process.argv.length === 2\n  if (doubleClick) {\n    process.argv.push('web')\n\
-        \    if (process.stdin.isTTY) process.on('exit', (code) => {\n      if (code !== 0) {\n        console.error('DeepSeek\
-        \ Harness could not start. Review the error above. Press Enter to close.')\n        try { const fs = process.getBuiltinModule('fs');\
-        \ fs.readSync(0, Buffer.alloc(1), 0, 1, null) } catch {}\n      }\n    })\n  }\n\"\"\"+needle);p.write_text(s)\np=Path('packages/bundle/web-app/src/index.ts');s=p.read_text();s=s.replace(\"\
-        import { createRequire } from 'node:module'\",\"import { createRequire } from 'node:module'\\nimport { isSea } from\
-        \ 'node:sea'\")\nneedle='function spawnBrowserLauncher(url: string): ChildProcess {';assert s.count(needle)==1\ns=s.replace(needle,needle+\"\
-        \"\"\n  if (process.platform === 'win32' && isSea()) {\n    return spawn(join(dirname(process.execPath), 'deepseek-browser-open.exe'),\
-        \ [url], {\n      env: scrubbedParentEnv(), stdio: ['ignore', 'inherit', 'pipe'], windowsHide: true,\n    })\n  }\n\
-        \"\"\");p.write_text(s)\n\nPY\ngit diff -- python/sdk-runtime/runtime-bootstrap.mjs packages/bundle/web-app/src/index.ts\
-        \ > windows-entry.patch"
+        needle=\"  const { runCli } = await import('@deepseek-ai/dsh/lib/bin.js')\"\nassert s.count(needle)==1\n\
+        s=s.replace(needle,\"\"\"  // Downstream Windows double-click entry; explicit CLI and subprocess routes\
+        \ remain unchanged.\n  const doubleClick = process.platform === 'win32' && isSea() && process.argv.length\
+        \ === 2\n  if (doubleClick) {\n    process.argv.push('web')\n    if (process.stdin.isTTY) process.on('exit',\
+        \ (code) => {\n      if (code !== 0) {\n        console.error('DeepSeek Harness could not start. Review\
+        \ the error above. Press Enter to close.')\n        try { const fs = process.getBuiltinModule('fs'); fs.readSync(0,\
+        \ Buffer.alloc(1), 0, 1, null) } catch {}\n      }\n    })\n  }\n\"\"\"+needle);p.write_text(s)\np=Path('packages/bundle/web-app/src/index.ts');s=p.read_text();s=s.replace(\"\
+        import { createRequire } from 'node:module'\",\"import { createRequire } from 'node:module'\\nimport { isSea\
+        \ } from 'node:sea'\")\nneedle='function spawnBrowserLauncher(url: string): ChildProcess {';assert s.count(needle)==1\n\
+        s=s.replace(needle,needle+\"\"\"\n  if (process.platform === 'win32' && isSea()) {\n    return spawn(join(dirname(process.execPath),\
+        \ 'deepseek-browser-open.exe'), [url], {\n      env: scrubbedParentEnv(), stdio: ['ignore', 'inherit', 'pipe'],\
+        \ windowsHide: true,\n    })\n  }\n\"\"\");p.write_text(s)\n\nfrom pathlib import Path\np=Path('packages/boot/app-boot/src/index.ts');s=p.read_text()\n\
+        needle='  bootstrapIncludes.set(ctx, entry)'\nassert s.count(needle)==1\ns=s.replace(needle,needle+'''\n\
+        \  // Downstream diagnostic only: retain identities without changing reload lookup or recovery.\n  Reflect.set(ctx.root,\
+        \ Symbol.for('dsh.downstream.include-diagnostic'), {\n    owner: ctx, moduleUrl: import.meta.url, map: bootstrapIncludes,\n\
+        \  })''')\nneedle='    if (entry === undefined) throw new Error(`${binName}: profile reload requires the\
+        \ root Include entry`)'\nassert s.count(needle)==1\ns=s.replace(needle,'''    if (entry === undefined) {\n\
+        \      const mounted = Reflect.get(ctx.root, Symbol.for('dsh.downstream.include-diagnostic')) as {\n   \
+        \     owner: Context; moduleUrl: string; map: object\n      } | undefined\n      const rootEntry = [...ctx.loader.entries()].find(row => row.id === 'include')\n\
+        \      throw new Error(`${binName}: profile reload requires the root Include entry; diagnostic ${JSON.stringify({\n\
+        \        markerPresent: mounted !== undefined,\n        sameModuleMap: mounted?.map === bootstrapIncludes,\n\
+        \        sameMountedContext: mounted?.owner === ctx,\n        contextIsRoot: ctx === ctx.root,\n       \
+        \ rootTrackedHere: bootstrapIncludes.has(ctx.root),\n        rootIncludePresent: rootEntry?.options.name\
+        \ === 'cordis:include',\n        mountedModuleUrl: mounted?.moduleUrl,\n        reloadModuleUrl: import.meta.url,\n\
+        \      })}`)\n    }''')\np.write_text(s)\n\nPY\ngit diff -- python/sdk-runtime/runtime-bootstrap.mjs packages/bundle/web-app/src/index.ts\
+        \ packages/boot/app-boot/src/index.ts > windows-entry.patch"
     - name: Build official native runtime
       shell: bash
       env:
