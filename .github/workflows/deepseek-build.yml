@@ -64,6 +64,22 @@ jobs:
     - name: Install locked dependencies
       shell: bash
       run: pnpm install --frozen-lockfile
+    - name: Enable validated bundled Office sidecar discovery
+      shell: bash
+      run: "python - <<'PY'\nfrom pathlib import Path\np=Path('python/sdk-runtime/runtime-bootstrap.mjs');s=p.read_text()\n\
+        old=\"const office = process.env.DSH_OFFICE_SIDECAR ?? (cache !== undefined && existsSync(join(cache, 'office', 'complete'))\
+        \ ? join(cache, 'office') : undefined)\"\nnew=\"\"\"// Direct native Web distributions carry the same pinned Office\
+        \ sidecar as the Python downloader.\nasync function selectOfficeSidecar() {\n  if (process.env.DSH_OFFICE_SIDECAR\
+        \ !== undefined) return process.env.DSH_OFFICE_SIDECAR\n  for (const candidate of [join(resourceDirectory, 'office'),\
+        \ ...(cache === undefined ? [] : [join(cache, 'office')])]) {\n    if (!existsSync(candidate)) continue\n    if (!existsSync(join(candidate,\
+        \ 'complete'))) throw new Error('Selected Office sidecar is incomplete')\n    if (downloads === undefined || await\
+        \ readFile(join(candidate, 'complete'), 'utf8') !== downloads.identity) {\n      throw new Error('Selected Office\
+        \ sidecar identity does not match downloads.json')\n    }\n    return candidate\n  }\n}\nconst office = await selectOfficeSidecar()\"\
+        \"\"\nassert s.count(old)==1;s=s.replace(old,new)\nneedle=\"  if (!isAbsolute(office)) throw new Error('DSH_OFFICE_SIDECAR\
+        \ must be an absolute directory')\"\nassert s.count(needle)==1\ns=s.replace(needle,needle+\"\\n  if (!existsSync(join(office,\
+        \ 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node')) || !existsSync(join(office, 'node_modules',\
+        \ '@deepseek-ai', 'libreoffice-kit', 'lib', 'cli.js'))) throw new Error('Selected Office sidecar lacks Node or CLI')\"\
+        )\np.write_text(s)\n\nPY\ngit diff -- python/sdk-runtime/runtime-bootstrap.mjs > office-entry.patch\n"
     - name: Apply bounded Windows direct EXE entry and native browser handoff
       if: runner.os == 'Windows'
       shell: bash
@@ -144,6 +160,42 @@ jobs:
         \ bundle');\nconst patch=execFileSync('git',['diff','--','python/sdk-runtime/package.json','pnpm-lock.yaml'],{encoding:'utf8'});\n\
         fs.writeFileSync('deployment-repair.patch',patch);result.patchSha256=sha('deployment-repair.patch');\nfs.writeFileSync('deployment-repair.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));\n\
         JS\n"
+    - name: Bundle pinned Office engine, dependency closure and standalone Node
+      shell: bash
+      run: "cat > prepare-office.ts <<'TS'\nimport { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises'\n\
+        import { join, resolve, relative } from 'node:path'\nimport { createHash } from 'node:crypto'\nimport { downloadOfficeSidecar\
+        \ } from './scripts/build-exe-for-python-sdk-office.ts'\nimport { downloadNodeRuntime } from './scripts/primary-runtime/prepare.ts'\n\
+        const resource = resolve('dist-exe', process.env.PACKAGE_PLATFORM!)\nconst manifest = JSON.parse(await readFile(join(resource,\
+        \ 'downloads.json'), 'utf8'))\nconst destination = join(resource, 'office')\nconst cache = join(process.env.RUNNER_TEMP!,\
+        \ 'office-verified-archives')\nawait mkdir(destination, { recursive: true })\nawait downloadNodeRuntime(manifest.target,\
+        \ join(destination, 'node'), cache)\nawait downloadOfficeSidecar(manifest.office, destination, cache)\nconst inventory\
+        \ = []\nfor (const item of manifest.office) {\n  const dir = join(destination, item.directory)\n  const pkg = JSON.parse(await\
+        \ readFile(join(dir, 'package.json'), 'utf8'))\n  if (pkg.name !== item.name || pkg.version !== item.version) throw\
+        \ new Error('Office pinned package mismatch')\n  if (pkg.name.startsWith('@deepseek-ai/libreoffice-kit') && pkg.license\
+        \ !== 'MPL-2.0') throw new Error('Office license changed')\n  const notices: string[] = []\n  async function scan(root:\
+        \ string) {\n    for (const entry of await readdir(root, { withFileTypes: true })) {\n      const path = join(root,\
+        \ entry.name)\n      if (entry.isDirectory()) await scan(path)\n      else if (/license|notice|copyright|source/i.test(entry.name))\
+        \ notices.push(relative(dir, path))\n    }\n  }\n  await scan(dir)\n  if (pkg.name.startsWith('@deepseek-ai/libreoffice-kit')\
+        \ && notices.length === 0) throw new Error('Office redistribution materials absent')\n  inventory.push({name:pkg.name,version:pkg.version,license:pkg.license,repository:pkg.repository,integrity:item.integrity,directory:item.directory,notices})\n\
+        }\nconst kit = JSON.parse(await readFile(join(destination,'node_modules/@deepseek-ai/libreoffice-kit/package.json'),'utf8'))\n\
+        const native = `${process.platform}-${process.arch}`\nconst selected = Object.hasOwn(kit.optionalDependencies ?? {},\
+        \ `@deepseek-ai/libreoffice-kit-${native}`) ? native : 'wasm'\nconst engines = inventory.filter(x=>x.name.startsWith('@deepseek-ai/libreoffice-kit-'))\n\
+        if (engines.length !== 1 || engines[0].name !== `@deepseek-ai/libreoffice-kit-${selected}`) throw new Error('Wrong\
+        \ Office engine closure')\nconst engineRoot = join(destination,engines[0].directory)\nconst receipt = JSON.parse(await\
+        \ readFile(join(engineRoot,'prebuilds.json'),'utf8'))\nif(receipt.status!=='built'||!/^https:\\/\\//.test(receipt.source?.repository)||!/^([a-f0-9]{40})$/.test(receipt.source?.revision)||!receipt.source?.files?.length||!receipt.licenses?.length)throw\
+        \ new Error('Office source/license receipt incomplete')\nfor(const file of [...receipt.source.files,...receipt.licenses.map((x:any)=>x.path)]){\n\
+        \ if(typeof file!=='string'||file.includes('..')||!file.startsWith('sources/')&&!file.startsWith('licenses/'))throw\
+        \ new Error('Office source/license path invalid')\n const hash=createHash('sha256').update(await readFile(join(engineRoot,file))).digest('hex')\n\
+        \ if(receipt.files[file]!==hash)throw new Error('Office source/license receipt hash mismatch')\n}\nawait writeFile(join(resource,'THIRD_PARTY_NOTICES.txt'),`LibreOffice\
+        \ Kit ${kit.version}: MPL-2.0. Complete API and engine package licenses, notices, source receipts, recipes and patches\
+        \ are retained under office/node_modules.\\nLibreOffice source: ${receipt.source.repository} commit ${receipt.source.revision},\
+        \ version ${receipt.source.version}.\\nExact packaged source/license paths and checksums: office/node_modules/${engines[0].name}/prebuilds.json.\\\
+        nNode.js license: office/node/LICENSE. Windows native engine requires Microsoft Visual C++ v14 x64 Redistributable.\\\
+        n`)\nconst node = join(destination,'node/bin',process.platform==='win32'?'node.exe':'node')\nif (!(await stat(join(destination,'node/LICENSE'))).isFile())throw\
+        \ new Error('Node license absent')\nif (!(await stat(node)).isFile()) throw new Error('Standalone Office Node absent')\n\
+        await writeFile(join(destination,'complete'),manifest.identity)\nawait writeFile(join(resource,'office-inventory.json'),JSON.stringify({identity:manifest.identity,selected,source:receipt.source,licenses:receipt.licenses,packages:inventory,nodeSha256:createHash('sha256').update(await\
+        \ readFile(node)).digest('hex')},null,2))\nconsole.log(JSON.stringify({officePackages:inventory.length,selected,kitVersion:kit.version,licensing:'complete\
+        \ package contents retained'}))\n\nTS\npnpm exec tsx prepare-office.ts\n"
     - name: Compile native Windows browser helper
       if: runner.os == 'Windows'
       shell: pwsh
@@ -170,7 +222,7 @@ jobs:
         \ root=pathlib.Path('delivery');root.mkdir();shutil.copy2(\"deployment-repair.json\",root/\"deployment-repair.json\"\
         );shutil.copy2(\"deployment-repair.patch\",root/\"deployment-repair.patch\");src=pathlib.Path('dist-exe');exe='deepseek-harness-sdk-runtime-'+p+('.exe'\
         \ if win else '')\nfor name in [exe,'deepseek-harness-sdk-runtime-'+p+('-rg.exe' if win else '-rg')]:shutil.copy2(src/name,root/name)\n\
-        if p.startswith('macos-'):shutil.copy2(src/(exe+'-spawn-helper'),root/(exe+'-spawn-helper'))\nshutil.copytree(src/p,root/p);shutil.copy2('LICENSE',root/'LICENSE.txt')\n\
+        if p.startswith('macos-'):shutil.copy2(src/(exe+'-spawn-helper'),root/(exe+'-spawn-helper'))\nshutil.copy2('office-entry.patch',root/'office-entry.patch');shutil.copytree(src/p,root/p);shutil.copy2('LICENSE',root/'LICENSE.txt')\n\
         if win:\n shutil.copy2(src/'deepseek-browser-open.exe',root/'deepseek-browser-open.exe');shutil.copy2('windows-entry.patch',root/'windows-entry.patch');shutil.copy2('windows-browser-open.cpp',root/'windows-browser-open.cpp')\n\
         else:\n starter=root/('Start-DeepSeek.command' if p.startswith('macos-') else 'Start-DeepSeek.sh');starter.write_text('#!/bin/sh\\\
         ncd \"$(dirname \"$0\")\" || exit 1\\n\"./'+exe+'\" web\\nresult=$?\\nif [ \"$result\" -ne 0 ]; then printf \"Startup\
@@ -184,14 +236,16 @@ jobs:
         \ must stay beside it. Native browser helper uses the Windows registered browser, without command scripts. Non-Windows:\
         \ launch Start-DeepSeek; Linux: run ./Start-DeepSeek.sh. Explicit CLI arguments remain supported. Windows downstream\
         \ source adjustment is recorded in windows-entry.patch.\\nThis is the Web UI distribution, not the Electron Desktop\
-        \ installer. Do not disable system security protections.\\nRuntime resources and ripgrep are included; optional Office/primary\
-        \ runtime capabilities download pinned resources from downloads.json. Linux packages are built on Ubuntu 24.04 and\
-        \ are not labeled manylinux or glibc 2.28 compatible. No user credentials are included. Configure your supported account\
-        \ yourself for model requests.\\nSee verification.json for exact checks. Linux ARM64 has native HTTP/assets checks\
-        \ only; no Google Chrome UI test is claimed.\\n',encoding='utf-8')\nwith tarfile.open('staged-payload.tar','w') as\
-        \ t:t.add(root,arcname='delivery')\nwith tarfile.open('staged-payload.tar') as t:t.extractall('staged-extraction',filter='data')\n\
-        \n'@ | Set-Content stage.py -Encoding utf8\npython stage.py\nif ($LASTEXITCODE -ne 0) { throw 'Python step failed'\
-        \ }"
+        \ installer. Do not disable system security protections.\\nRuntime resources and ripgrep are included; Office conversion\
+        \ sidecar and standalone Node are bundled with retained upstream licensing materials; only optional primary authoring\
+        \ resources download on demand. See '+p+'/office-inventory.json. Windows Office native engine requires Microsoft Visual\
+        \ C++ v14 x64 Redistributable. Kit and engines are MPL-2.0; source and notices are retained in the complete Office\
+        \ package contents. Linux packages are built on Ubuntu 24.04 and are not labeled manylinux or glibc 2.28 compatible.\
+        \ No user credentials are included. Configure your supported account yourself for model requests.\\nSee verification.json\
+        \ for exact checks. Linux ARM64 has native HTTP/assets checks only; no Google Chrome UI test is claimed.\\n',encoding='utf-8')\n\
+        with tarfile.open('staged-payload.tar','w') as t:t.add(root,arcname='delivery')\nwith tarfile.open('staged-payload.tar')\
+        \ as t:t.extractall('staged extraction',filter='data')\n\n'@ | Set-Content stage.py -Encoding utf8\npython stage.py\n\
+        if ($LASTEXITCODE -ne 0) { throw 'Python step failed' }"
     - name: Stage POSIX package
       if: runner.os != 'Windows'
       shell: bash
@@ -199,7 +253,7 @@ jobs:
         \ root=pathlib.Path('delivery');root.mkdir();shutil.copy2(\"deployment-repair.json\",root/\"deployment-repair.json\"\
         );shutil.copy2(\"deployment-repair.patch\",root/\"deployment-repair.patch\");src=pathlib.Path('dist-exe');exe='deepseek-harness-sdk-runtime-'+p+('.exe'\
         \ if win else '')\nfor name in [exe,'deepseek-harness-sdk-runtime-'+p+('-rg.exe' if win else '-rg')]:shutil.copy2(src/name,root/name)\n\
-        if p.startswith('macos-'):shutil.copy2(src/(exe+'-spawn-helper'),root/(exe+'-spawn-helper'))\nshutil.copytree(src/p,root/p);shutil.copy2('LICENSE',root/'LICENSE.txt')\n\
+        if p.startswith('macos-'):shutil.copy2(src/(exe+'-spawn-helper'),root/(exe+'-spawn-helper'))\nshutil.copy2('office-entry.patch',root/'office-entry.patch');shutil.copytree(src/p,root/p);shutil.copy2('LICENSE',root/'LICENSE.txt')\n\
         if win:\n shutil.copy2(src/'deepseek-browser-open.exe',root/'deepseek-browser-open.exe');shutil.copy2('windows-entry.patch',root/'windows-entry.patch');shutil.copy2('windows-browser-open.cpp',root/'windows-browser-open.cpp')\n\
         else:\n starter=root/('Start-DeepSeek.command' if p.startswith('macos-') else 'Start-DeepSeek.sh');starter.write_text('#!/bin/sh\\\
         ncd \"$(dirname \"$0\")\" || exit 1\\n\"./'+exe+'\" web\\nresult=$?\\nif [ \"$result\" -ne 0 ]; then printf \"Startup\
@@ -213,22 +267,28 @@ jobs:
         \ must stay beside it. Native browser helper uses the Windows registered browser, without command scripts. Non-Windows:\
         \ launch Start-DeepSeek; Linux: run ./Start-DeepSeek.sh. Explicit CLI arguments remain supported. Windows downstream\
         \ source adjustment is recorded in windows-entry.patch.\\nThis is the Web UI distribution, not the Electron Desktop\
-        \ installer. Do not disable system security protections.\\nRuntime resources and ripgrep are included; optional Office/primary\
-        \ runtime capabilities download pinned resources from downloads.json. Linux packages are built on Ubuntu 24.04 and\
-        \ are not labeled manylinux or glibc 2.28 compatible. No user credentials are included. Configure your supported account\
-        \ yourself for model requests.\\nSee verification.json for exact checks. Linux ARM64 has native HTTP/assets checks\
-        \ only; no Google Chrome UI test is claimed.\\n',encoding='utf-8')\nwith tarfile.open('staged-payload.tar','w') as\
-        \ t:t.add(root,arcname='delivery')\nwith tarfile.open('staged-payload.tar') as t:t.extractall('staged-extraction',filter='data')\n\
-        \nPY"
+        \ installer. Do not disable system security protections.\\nRuntime resources and ripgrep are included; Office conversion\
+        \ sidecar and standalone Node are bundled with retained upstream licensing materials; only optional primary authoring\
+        \ resources download on demand. See '+p+'/office-inventory.json. Windows Office native engine requires Microsoft Visual\
+        \ C++ v14 x64 Redistributable. Kit and engines are MPL-2.0; source and notices are retained in the complete Office\
+        \ package contents. Linux packages are built on Ubuntu 24.04 and are not labeled manylinux or glibc 2.28 compatible.\
+        \ No user credentials are included. Configure your supported account yourself for model requests.\\nSee verification.json\
+        \ for exact checks. Linux ARM64 has native HTTP/assets checks only; no Google Chrome UI test is claimed.\\n',encoding='utf-8')\n\
+        with tarfile.open('staged-payload.tar','w') as t:t.add(root,arcname='delivery')\nwith tarfile.open('staged-payload.tar')\
+        \ as t:t.extractall('staged extraction',filter='data')\n\nPY"
     - name: Install isolated official test tooling
       shell: bash
-      run: npm install --prefix "$RUNNER_TEMP/harness-test-tools" --no-audit --no-fund playwright-core@1.61.1
+      run: 'npm install --prefix "$RUNNER_TEMP/harness-test-tools" --no-audit --no-fund playwright-core@1.61.1
+
+        python -m pip install --disable-pip-version-check pypdf==6.12.2
+
+        '
     - name: Verify direct EXE, durable onboarding, restart and default Windows workspace
       if: runner.os == 'Windows'
       shell: pwsh
       run: "@'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
-        const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
+        const out=path.resolve('staged extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
         const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
         const yaml=require('js-yaml');\nfunction noticePersisted(home){const file=path.join(home,'profiles/web/cordis.patch.yml');if(!fs.existsSync(file))return\
         \ false;const entries=yaml.load(fs.readFileSync(file,'utf8'));return Array.isArray(entries)&&entries.some(e=>e.id==='ui-settings-general'&&e.config?.welcomeNoticeVersion==='2026-09-28.1');}\n\
@@ -236,27 +296,49 @@ jobs:
         \ v of Object.values(value))if(v&&typeof v==='object')settingsErrors(v,output);}\nconst scrub=s=>String(s).replace(/@deepseek-ai\\\
         /([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\\
         /-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
-        \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}}]));const\
+        \ officeProbe=path.join(process.env.RUNNER_TEMP,'delivery-office-probe.mjs'),officePdf=path.join(report,'office-provider.pdf'),officeResult=path.join(process.env.RUNNER_TEMP,'office-probe-result.json');fs.writeFileSync(officeProbe,\"\
+        import { readFile, writeFile } from 'node:fs/promises'\\nexport const name = 'delivery-office-regression'\\nexport\
+        \ async function apply(ctx, config) {\\n  const source = await readFile(config.input)\\n  const request = bytes =>\
+        \ ({extension:'docx',priority:'foreground',source:{key:'delivery-fixture-'+bytes.length,version:'1',bytes:bytes.length,async\
+        \ read(signal,maxBytes){signal.throwIfAborted();if(bytes.length>maxBytes)throw Error('Fixture exceeds reservation');return\
+        \ {bytes,version:'1'}}}})\\n  const result = await ctx.officeToPdf.convert(request(source))\\n  const pdf = Buffer.from(result.pdf)\\\
+        n  if(pdf.length<100||pdf.subarray(0,5).toString()!=='%PDF-')throw Error('Provider did not create PDF')\\n  await\
+        \ writeFile(config.output,pdf)\\n  let rejected=false\\n  try { await ctx.officeToPdf.convert(request(Buffer.from('Not\
+        \ an Office document'))) } catch { rejected=true }\\n  if(!rejected)throw Error('Malformed DOCX unexpectedly accepted')\\\
+        n  const again = await ctx.officeToPdf.convert(request(source))\\n  if(Buffer.from(again.pdf).subarray(0,5).toString()!=='%PDF-')throw\
+        \ Error('Provider failed after invalid input')\\n  await writeFile(config.result,JSON.stringify({provider:'officeToPdf',validDocx:true,malformedRejected:true,cachedValidReadAfterInvalidInput:true,pdfBytes:pdf.length,missingFonts:result.missingFonts}))\\\
+        n}\\n\");const officeFixture=path.resolve('packages/bundle/web-app/tests/fixtures/document-conversion.docx');const\
+        \ officeRow={insert:[{id:'delivery-office-regression',name:require('node:url').pathToFileURL(officeProbe).href,inject:['officeToPdf'],config:{input:officeFixture,output:officePdf,result:officeResult}}]};const\
+        \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}},officeRow]));const\
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
+        \ cleanEnv={...process.env,DSH_RESOURCE_CACHE:path.join(process.env.RUNNER_TEMP,'empty-office-cache')};for(const key\
+        \ of ['DSH_OFFICE_SIDECAR','DSH_BUNDLED_OFFICE_NODE','DSH_BUNDLED_OFFICE_CLI','DSH_RUNTIME_DOWNLOAD'])delete cleanEnv[key];const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
         \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=(windows?3:2);trial++){\n const activeHome=trial===3?path.join(process.env.RUNNER_TEMP,'harness-default-home'):home;fs.mkdirSync(activeHome,{recursive:true});\n\
         \ if(trial===2&&!noticePersisted(activeHome)&&platform!=='linux-arm64')throw Error('Notice acknowledgement absent\
-        \ before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...cleanEnv,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
-        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
+        \ try{phase='wait-server';let launch;\n for(let i=0;i<300;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
         .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
-        \ if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek\
-        \ browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
-        \ browser: native Windows handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await\
-        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const\
-        \ html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"\
-        ']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw Error('No frontend assets');for(const\
-        \ asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw Error('Unexpected external asset');const a=await\
-        \ api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw Error('Missing frontend asset')}\n let\
-        \ ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await\
-        \ chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({locale:'en-US'});lastPage=page;let\
-        \ pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
+        \ if(!launch)throw Error('Startup URL absent');\n if(/entry did not activate|entries did not activate|failed to import:/i.test(output))throw\
+        \ Error('Runtime plugin activation warning');\n if(trial===1){phase='office-provider-pdf';if(!fs.existsSync(officeResult))throw\
+        \ Error('Office provider regression did not execute');const office=path.join(out,platform,'office');const node=path.join(office,'node/bin',windows?'node.exe':'node'),cli=path.join(office,'node_modules/@deepseek-ai/libreoffice-kit/lib/cli.js');const\
+        \ cliPdf=path.join(report,'office-cli.pdf');execFileSync(node,[cli,'capabilities','--json'],{env:{...cleanEnv,PATH:''},timeout:120000,stdio:'pipe'});execFileSync(node,[cli,'convert','--input',officeFixture,'--output',cliPdf],{env:{...cleanEnv,PATH:''},timeout:180000,stdio:'pipe'});const\
+        \ parsed=execFileSync('python',['-c',\"import sys,json;from pypdf import PdfReader;docs=[PdfReader(p) for p in sys.argv[1:]];assert\
+        \ all(len(d.pages)>=1 and 'Office preview ready' in ''.join(p.extract_text() or '' for p in d.pages) for d in docs);print(json.dumps({'parsed':True,'pages':[len(d.pages)\
+        \ for d in docs],'textVerified':True}))\",officePdf,cliPdf],{encoding:'utf8',timeout:30000});const check=JSON.parse(fs.readFileSync(officeResult,'utf8'));Object.assign(check,{pdfValidation:JSON.parse(parsed),standaloneCli:true,resourceDiscovery:'bundled\
+        \ sidecar, fresh cache, no override'});fs.writeFileSync(path.join(report,'office-verification.json'),JSON.stringify(check,null,2));}\n\
+        \n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek browser: native Windows\
+        \ handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek browser: native Windows\
+        \ handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await request.newContext();const\
+        \ response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const html=await response.text();\n\
+        \ const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n\
+        \ if(!assets.length)throw Error('No frontend assets');for(const asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw\
+        \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
+        \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
+        \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
+        \ page=await browser.newPage({locale:'en-US'});lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
         \ response=>{if(response.url().startsWith('http://127.0.0.1:3080/')&&response.headers()['content-type']?.includes('application/json')){try{settingsErrors(await\
         \ response.json(),diagnostics.settingsErrors)}catch{}}});page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
         \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
@@ -286,9 +368,11 @@ jobs:
         \ Error('Default-home verification unexpectedly has a home override');\n if(await page.getByRole('alert').filter({hasText:'Unable\
         \ to create default workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const\
         \ clean=new URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
-        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n evidence.push({trial,entry:windows?'direct\
-        \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
-        \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
+        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n if(/entry\
+        \ did not activate|entries did not activate|failed to import:/i.test(output))throw Error('Late runtime plugin activation\
+        \ warning');evidence.push({trial,entry:windows?'direct EXE with no arguments from unrelated working directory':'explicit\
+        \ web CLI',browserHandoff:windows?'native ShellExecuteExW success observed; UI separately verified in Chrome':'not\
+        \ tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
         \ OS default Documents discovery; no home override':'isolated explicit CI fixture',noticeAcknowledgement:platform==='linux-arm64'?'not-browser-tested':trial===2?'persisted\
         \ across process restart':'saved through real UI',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
         \ }catch(e){diagnostics.noticePersisted=noticePersisted(activeHome);diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown\
@@ -307,7 +391,7 @@ jobs:
       shell: bash
       run: "cat > harness-smoke.cjs <<'JS'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
-        const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
+        const out=path.resolve('staged extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
         const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
         const yaml=require('js-yaml');\nfunction noticePersisted(home){const file=path.join(home,'profiles/web/cordis.patch.yml');if(!fs.existsSync(file))return\
         \ false;const entries=yaml.load(fs.readFileSync(file,'utf8'));return Array.isArray(entries)&&entries.some(e=>e.id==='ui-settings-general'&&e.config?.welcomeNoticeVersion==='2026-09-28.1');}\n\
@@ -315,27 +399,49 @@ jobs:
         \ v of Object.values(value))if(v&&typeof v==='object')settingsErrors(v,output);}\nconst scrub=s=>String(s).replace(/@deepseek-ai\\\
         /([a-z0-9-]+)/g,(_,n)=>'PKG['+n.replace(/-/g,' ')+']').replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\\
         /-]{24,}/g,'[REDACTED]');\n(async()=>{const evidence=[];const fixture=path.join(process.env.RUNNER_TEMP,'harness-workspace-documents');fs.mkdirSync(fixture,{recursive:true});const\
-        \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}}]));const\
+        \ officeProbe=path.join(process.env.RUNNER_TEMP,'delivery-office-probe.mjs'),officePdf=path.join(report,'office-provider.pdf'),officeResult=path.join(process.env.RUNNER_TEMP,'office-probe-result.json');fs.writeFileSync(officeProbe,\"\
+        import { readFile, writeFile } from 'node:fs/promises'\\nexport const name = 'delivery-office-regression'\\nexport\
+        \ async function apply(ctx, config) {\\n  const source = await readFile(config.input)\\n  const request = bytes =>\
+        \ ({extension:'docx',priority:'foreground',source:{key:'delivery-fixture-'+bytes.length,version:'1',bytes:bytes.length,async\
+        \ read(signal,maxBytes){signal.throwIfAborted();if(bytes.length>maxBytes)throw Error('Fixture exceeds reservation');return\
+        \ {bytes,version:'1'}}}})\\n  const result = await ctx.officeToPdf.convert(request(source))\\n  const pdf = Buffer.from(result.pdf)\\\
+        n  if(pdf.length<100||pdf.subarray(0,5).toString()!=='%PDF-')throw Error('Provider did not create PDF')\\n  await\
+        \ writeFile(config.output,pdf)\\n  let rejected=false\\n  try { await ctx.officeToPdf.convert(request(Buffer.from('Not\
+        \ an Office document'))) } catch { rejected=true }\\n  if(!rejected)throw Error('Malformed DOCX unexpectedly accepted')\\\
+        n  const again = await ctx.officeToPdf.convert(request(source))\\n  if(Buffer.from(again.pdf).subarray(0,5).toString()!=='%PDF-')throw\
+        \ Error('Provider failed after invalid input')\\n  await writeFile(config.result,JSON.stringify({provider:'officeToPdf',validDocx:true,malformedRejected:true,cachedValidReadAfterInvalidInput:true,pdfBytes:pdf.length,missingFonts:result.missingFonts}))\\\
+        n}\\n\");const officeFixture=path.resolve('packages/bundle/web-app/tests/fixtures/document-conversion.docx');const\
+        \ officeRow={insert:[{id:'delivery-office-regression',name:require('node:url').pathToFileURL(officeProbe).href,inject:['officeToPdf'],config:{input:officeFixture,output:officePdf,result:officeResult}}]};const\
+        \ patch=path.join(process.env.RUNNER_TEMP,'harness-workspace-test.patch.json');fs.writeFileSync(patch,JSON.stringify([{id:'workspace-controller',config:{documentsDirectory:fixture}},officeRow]));const\
         \ home=path.join(process.env.RUNNER_TEMP,'harness-test-home');fs.mkdirSync(home,{recursive:true});fs.writeFileSync(path.join(home,'cordis.patch.yml'),fs.readFileSync(patch));const\
+        \ cleanEnv={...process.env,DSH_RESOURCE_CACHE:path.join(process.env.RUNNER_TEMP,'empty-office-cache')};for(const key\
+        \ of ['DSH_OFFICE_SIDECAR','DSH_BUNDLED_OFFICE_NODE','DSH_BUNDLED_OFFICE_CLI','DSH_RUNTIME_DOWNLOAD'])delete cleanEnv[key];const\
         \ unrelated=path.join(process.env.RUNNER_TEMP,'unrelated working directory');fs.mkdirSync(unrelated,{recursive:true});\n\
         if(windows){const help=execFileSync(binary,['--help'],{cwd:unrelated,encoding:'utf8',timeout:30000});if(!/usage|options|dsh/i.test(help))throw\
         \ Error('Explicit CLI help did not render');}\nfor(trial=1;trial<=(windows?3:2);trial++){\n const activeHome=trial===3?path.join(process.env.RUNNER_TEMP,'harness-default-home'):home;fs.mkdirSync(activeHome,{recursive:true});\n\
         \ if(trial===2&&!noticePersisted(activeHome)&&platform!=='linux-arm64')throw Error('Notice acknowledgement absent\
-        \ before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...process.env,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
+        \ before restart');\n let output=''; const child=spawn(binary,windows?[]:['web','--no-open','--port','3080'],{cwd:unrelated,env:{...cleanEnv,DSH_HOME:activeHome,DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
-        \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
+        \ try{phase='wait-server';let launch;\n for(let i=0;i<300;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
         .0\\.1:3080\\/\\S+)/);if(m){launch=m[1];break}if(child.exitCode!==null)throw Error('Server exited');await new Promise(r=>setTimeout(r,1000))}\n\
-        \ if(!launch)throw Error('Startup URL absent');\n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek\
-        \ browser: native Windows handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek\
-        \ browser: native Windows handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await\
-        \ request.newContext();const response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const\
-        \ html=await response.text();\n const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"\
-        ']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n if(!assets.length)throw Error('No frontend assets');for(const\
-        \ asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw Error('Unexpected external asset');const a=await\
-        \ api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw Error('Missing frontend asset')}\n let\
-        \ ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await\
-        \ chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({locale:'en-US'});lastPage=page;let\
-        \ pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
+        \ if(!launch)throw Error('Startup URL absent');\n if(/entry did not activate|entries did not activate|failed to import:/i.test(output))throw\
+        \ Error('Runtime plugin activation warning');\n if(trial===1){phase='office-provider-pdf';if(!fs.existsSync(officeResult))throw\
+        \ Error('Office provider regression did not execute');const office=path.join(out,platform,'office');const node=path.join(office,'node/bin',windows?'node.exe':'node'),cli=path.join(office,'node_modules/@deepseek-ai/libreoffice-kit/lib/cli.js');const\
+        \ cliPdf=path.join(report,'office-cli.pdf');execFileSync(node,[cli,'capabilities','--json'],{env:{...cleanEnv,PATH:''},timeout:120000,stdio:'pipe'});execFileSync(node,[cli,'convert','--input',officeFixture,'--output',cliPdf],{env:{...cleanEnv,PATH:''},timeout:180000,stdio:'pipe'});const\
+        \ parsed=execFileSync('python',['-c',\"import sys,json;from pypdf import PdfReader;docs=[PdfReader(p) for p in sys.argv[1:]];assert\
+        \ all(len(d.pages)>=1 and 'Office preview ready' in ''.join(p.extract_text() or '' for p in d.pages) for d in docs);print(json.dumps({'parsed':True,'pages':[len(d.pages)\
+        \ for d in docs],'textVerified':True}))\",officePdf,cliPdf],{encoding:'utf8',timeout:30000});const check=JSON.parse(fs.readFileSync(officeResult,'utf8'));Object.assign(check,{pdfValidation:JSON.parse(parsed),standaloneCli:true,resourceDiscovery:'bundled\
+        \ sidecar, fresh cache, no override'});fs.writeFileSync(path.join(report,'office-verification.json'),JSON.stringify(check,null,2));}\n\
+        \n if(windows){phase='native-browser-handoff';for(let i=0;i<300&&!output.includes('deepseek browser: native Windows\
+        \ handoff accepted');i++)await new Promise(r=>setTimeout(r,100));if(!output.includes('deepseek browser: native Windows\
+        \ handoff accepted'))throw Error('Native OS browser handoff not observed');}\n phase='http';api=await request.newContext();const\
+        \ response=await api.get(launch);if(response.status()!==200)throw Error('HTTP not 200');const html=await response.text();\n\
+        \ const assets=[...html.matchAll(/(?:src|href)=[\"']([^\"']+\\.(?:js|css)(?:\\?[^\"']*)?)[\"']/g)].map(m=>new URL(m[1],'http://127.0.0.1:3080/'));\n\
+        \ if(!assets.length)throw Error('No frontend assets');for(const asset of assets){if(asset.origin!=='http://127.0.0.1:3080')throw\
+        \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
+        \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
+        \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
+        \ page=await browser.newPage({locale:'en-US'});lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[],settingsErrors:[]};page.on('websocket',ws=>ws.on('framereceived',frame=>{try{settingsErrors(JSON.parse(String(frame.payload)),diagnostics.settingsErrors)}catch{}}));page.on('response',async\
         \ response=>{if(response.url().startsWith('http://127.0.0.1:3080/')&&response.headers()['content-type']?.includes('application/json')){try{settingsErrors(await\
         \ response.json(),diagnostics.settingsErrors)}catch{}}});page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
         \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
@@ -365,9 +471,11 @@ jobs:
         \ Error('Default-home verification unexpectedly has a home override');\n if(await page.getByRole('alert').filter({hasText:'Unable\
         \ to create default workspace'}).count())throw Error('Isolated default workspace failed');\n phase='check-auth-redirect';const\
         \ clean=new URL(page.url());if(clean.search||clean.hash)throw Error('Authentication URL not scrubbed');phase='screenshot';await\
-        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n evidence.push({trial,entry:windows?'direct\
-        \ EXE with no arguments from unrelated working directory':'explicit web CLI',browserHandoff:windows?'native ShellExecuteExW\
-        \ success observed; UI separately verified in Chrome':'not tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
+        \ page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n if(/entry\
+        \ did not activate|entries did not activate|failed to import:/i.test(output))throw Error('Late runtime plugin activation\
+        \ warning');evidence.push({trial,entry:windows?'direct EXE with no arguments from unrelated working directory':'explicit\
+        \ web CLI',browserHandoff:windows?'native ShellExecuteExW success observed; UI separately verified in Chrome':'not\
+        \ tested --no-open',httpStatus:200,assetCount:assets.length,ui,visibleTextLength,workspaceDocuments:trial===3?'native\
         \ OS default Documents discovery; no home override':'isolated explicit CI fixture',noticeAcknowledgement:platform==='linux-arm64'?'not-browser-tested':trial===2?'persisted\
         \ across process restart':'saved through real UI',workspace:platform==='linux-arm64'?'not-browser-tested':'isolated-default-created-composer-editable'});\n\
         \ }catch(e){diagnostics.noticePersisted=noticePersisted(activeHome);diagnostics.startupErrors=output.split('\\n').filter(l=>/error|failed|unknown\
@@ -391,7 +499,7 @@ jobs:
 
         let s=fs.readFileSync(''harness-smoke.cjs'',''utf8'');
 
-        s=s.replace("path.resolve(''staged-extraction/delivery'')","path.resolve(''python/sdk-runtime/src/deepseek_harness_runtime/runtime/node'')")
+        s=s.replace("path.resolve(''staged extraction/delivery'')","path.resolve(''python/sdk-runtime/src/deepseek_harness_runtime/runtime/node'')")
 
         .replace("report=path.resolve(''delivery'')","report=path.resolve(''carrier-evidence'')")
 
