@@ -123,7 +123,8 @@ jobs:
       run: "@'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
         const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
-        const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0;\n\
+        const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
+        const scrub=s=>String(s).replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\/-]{24,}/g,'[REDACTED]');\n\
         (async()=>{const evidence=[];\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,['web','--no-open','--port','3080'],{cwd:out,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
         \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
@@ -135,18 +136,19 @@ jobs:
         \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
         \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
         \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
-        \ page=await browser.newPage();let pageErrors=0;page.on('pageerror',()=>pageErrors++);phase='navigate';await page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await\
-        \ page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
+        \ page=await browser.newPage();lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[]};page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
+        \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
         \ page.locator('body').innerText()).trim().length;\n phase='app-controls';await page.waitForFunction(()=>document.querySelector('button,input,textarea,[role=button]')\
         \ && /deepseek|new chat|settings|sign in|log in|\u65B0\u4F1A\u8BDD|\u8BBE\u7F6E|\u767B\u5F55/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
         \ Error('Frontend exceptions');\n phase='check-auth-redirect';const clean=new URL(page.url());if(clean.search||clean.hash)throw\
         \ Error('Authentication URL not scrubbed');phase='screenshot';await page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n\
-        \ evidence.push({trial,httpStatus:200,assetCount:assets.length,ui,visibleTextLength});\n }finally{if(browser)await\
-        \ browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
+        \ evidence.push({trial,httpStatus:200,assetCount:assets.length,ui,visibleTextLength});\n }catch(e){if(lastPage){try{diagnostics.body=scrub((await\
+        \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__}));}catch{}}throw\
+        \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
         \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
         \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
         '@ | Set-Content harness-smoke.cjs -Encoding utf8\nnode harness-smoke.cjs\nif ($LASTEXITCODE -ne 0) { throw 'Startup\
         \ verification failed' }"
     - name: Verify POSIX HTTP assets and available Chrome UI twice
@@ -155,7 +157,8 @@ jobs:
       run: "cat > harness-smoke.cjs <<'JS'\nconst fs=require('node:fs'),path=require('node:path'),{spawn,execFileSync}=require('node:child_process');\n\
         const {chromium,request}=require(path.join(process.env.RUNNER_TEMP,'harness-test-tools/node_modules/playwright-core'));\n\
         const out=path.resolve('staged-extraction/delivery'),report=path.resolve('delivery'),platform=process.env.PACKAGE_PLATFORM,windows=process.platform==='win32';\n\
-        const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0;\n\
+        const binary=path.join(out,'deepseek-harness-sdk-runtime-'+platform+(windows?'.exe':''));\nlet phase='start',trial=0,lastPage,diagnostics={};\n\
+        const scrub=s=>String(s).replace(/https?:\\/\\/[^\\s]+/g,'[URL]').replace(/[A-Za-z0-9_+=\\/-]{24,}/g,'[REDACTED]');\n\
         (async()=>{const evidence=[];\nfor(trial=1;trial<=2;trial++){\n let output=''; const child=spawn(binary,['web','--no-open','--port','3080'],{cwd:out,env:{...process.env,DSH_HOME:path.join(process.env.RUNNER_TEMP,'harness-test-home'),DSH_TELEMETRY_DISABLED:'1'},stdio:['ignore','pipe','pipe'],detached:!windows});\n\
         \ child.stdout.on('data',b=>output+=b.toString());child.stderr.on('data',b=>output+=b.toString());let browser,api;\n\
         \ try{phase='wait-server';let launch;\n for(let i=0;i<120;i++){let m=output.match(/dsh web: (http:\\/\\/127\\.0\\\
@@ -167,18 +170,19 @@ jobs:
         \ Error('Unexpected external asset');const a=await api.get(asset.href);if(a.status()!==200||(await a.body()).length<1)throw\
         \ Error('Missing frontend asset')}\n let ui='not-tested-no-official-Chrome-linux-arm64',visibleTextLength=null;\n\
         \ if(platform!=='linux-arm64'){\n phase='launch-chrome';browser=await chromium.launch({channel:'chrome',headless:true});const\
-        \ page=await browser.newPage();let pageErrors=0;page.on('pageerror',()=>pageErrors++);phase='navigate';await page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await\
-        \ page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
+        \ page=await browser.newPage();lastPage=page;let pageErrors=0;diagnostics={pageErrors:[],consoleErrors:[]};page.on('pageerror',e=>{pageErrors++;diagnostics.pageErrors.push(scrub(e.message))});page.on('console',m=>{if(m.type()==='error')diagnostics.consoleErrors.push(scrub(m.text()))});phase='navigate';await\
+        \ page.goto(launch,{waitUntil:'domcontentloaded',timeout:60000});phase='render';await page.waitForFunction(()=>document.body&&document.body.innerText.trim().length>=15,null,{timeout:60000});visibleTextLength=(await\
         \ page.locator('body').innerText()).trim().length;\n phase='app-controls';await page.waitForFunction(()=>document.querySelector('button,input,textarea,[role=button]')\
         \ && /deepseek|new chat|settings|sign in|log in|\u65B0\u4F1A\u8BDD|\u8BBE\u7F6E|\u767B\u5F55/i.test(document.body.innerText),null,{timeout:60000});if(pageErrors)throw\
         \ Error('Frontend exceptions');\n phase='check-auth-redirect';const clean=new URL(page.url());if(clean.search||clean.hash)throw\
         \ Error('Authentication URL not scrubbed');phase='screenshot';await page.screenshot({path:path.join(report,`startup-${trial}.png`),fullPage:true});ui='passed-native-Chrome';}\n\
-        \ evidence.push({trial,httpStatus:200,assetCount:assets.length,ui,visibleTextLength});\n }finally{if(browser)await\
-        \ browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
+        \ evidence.push({trial,httpStatus:200,assetCount:assets.length,ui,visibleTextLength});\n }catch(e){if(lastPage){try{diagnostics.body=scrub((await\
+        \ lastPage.locator('body').innerText()).slice(0,4000));diagnostics.controls=await lastPage.locator('button,input,textarea,[role=button]').count();diagnostics.boot=await lastPage.evaluate(()=>({visible:!!document.querySelector('[data-dsh-boot]'),spinner:!!document.querySelector('[data-dsh-boot-spinner]'),moduleLoader:typeof window.__ModuleLoader__,boot:typeof window.__DSH_BOOT__,ready:typeof window.__DSH_BOOT_READY__}));}catch{}}throw\
+        \ e;}finally{if(browser)await browser.close();if(api)await api.dispose();if(child.exitCode===null){try{if(windows)execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});else\
         \ process.kill(-child.pid,'SIGTERM')}catch{}}output='';for(let i=0;i<150&&child.exitCode===null;i++)await new Promise(r=>setTimeout(r,100));if(child.exitCode===null){try{if(!windows)process.kill(-child.pid,'SIGKILL')}catch{}await\
         \ new Promise(r=>setTimeout(r,1000));}}\n}\nfs.writeFileSync(path.join(report,'verification.json'),JSON.stringify({source:process.env.SOURCE_SHA,platform,host:process.platform,arch:process.arch,checkedAt:new\
         \ Date().toISOString(),checks:evidence,modelAuthentication:'not tested; no credentials provided'},null,2));\n})().catch(e=>{const\
-        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
+        \ diagnostic={result:'failed',phase,trial,errorClass:e?.name||'Error',diagnostics,rawOutput:'withheld'};fs.writeFileSync('startup-diagnostic.json',JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic));process.exitCode=1});\n\
         JS\nnode harness-smoke.cjs"
     - name: Archive Windows package
       if: runner.os == 'Windows'
