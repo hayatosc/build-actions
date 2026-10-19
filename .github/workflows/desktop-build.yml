@@ -121,8 +121,19 @@ jobs:
         \ not in {p.name.lower() for p in files[arch]} for n in needed):raise RuntimeError('Architecture-specific CRT dependency\
         \ missing')\n  if file.parent in destinations and destinations[file.parent]!=arch:raise RuntimeError('Mixed architecture\
         \ CRT directory: '+str(file.parent.relative_to(root)))\n  destinations[file.parent]=arch;consumers.append({'file':str(file.relative_to(root)),'architecture':arch,'crtImports':needed})\n\
-        for destination,arch in destinations.items():\n for file in files[arch]:\n  pe=pefile.PE(str(file),fast_load=True);actual=machines.get(pe.FILE_HEADER.Machine);pe.close()\n\
-        \  if actual!=arch:raise RuntimeError('Redistributable machine mismatch: '+file.name)\n  shutil.copy2(file,destination/file.name)\n\
+        source_machines=[]\nfor source_arch,group in files.items():\n for source_file in group:\n  pe=pefile.PE(str(source_file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;pe.close()\n\
+        \  source_machines.append({'architecture':source_arch,'file':source_file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(source_file.read_bytes()).hexdigest()})\n\
+        evidence=workspace/'desktop-qa-results';evidence.mkdir(exist_ok=True)\n(evidence/'crt-source-machines.json').write_text(json.dumps({'sources':source_machines,'destinations':{p.relative_to(root).as_posix():a\
+        \ for p,a in destinations.items()}},indent=2))\nfor destination,arch in destinations.items():\n for file in files[arch]:\n\
+        \  pe=pefile.PE(str(file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;actual=machines.get(source_machine);pe.close()\n\
+        \  if actual!=arch:\n   pe=pefile.PE(str(file));load=getattr(getattr(pe,'DIRECTORY_ENTRY_LOAD_CONFIG',None),'struct',None)\n\
+        \   details={'architecture':arch,'file':file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(file.read_bytes()).hexdigest(),'loadConfig':load.dump()\
+        \ if load else None};pe.close()\n   vs=next((p for p in source.parents if (p/'VC/Tools/MSVC').is_dir()),None)\n  \
+        \ if vs is not None:\n    dumpbins=sorted((vs/'VC/Tools/MSVC').glob('*/bin/Hostx64/x64/dumpbin.exe'),reverse=True)\n\
+        \    if dumpbins:\n     headers=subprocess.run([str(dumpbins[0]),'/headers',str(file)],capture_output=True,text=True,timeout=30,check=True).stdout\n\
+        \     details['dumpbinHeaders']=[line for line in headers.splitlines() if str(file).lower() not in line.lower()]\n\
+        \   (evidence/'crt-source-mismatch.json').write_text(json.dumps(details,indent=2))\n   raise RuntimeError('Redistributable\
+        \ machine mismatch: '+arch+'/'+file.name+' machine='+hex(source_machine))\n  shutil.copy2(file,destination/file.name)\n\
         if wheel_receipt is not None:\n python=root/'dependencies/python/python.exe';assert python.is_file()\n env={k:v for\
         \ k,v in os.environ.items() if k.upper() in ('SYSTEMROOT','WINDIR','TEMP','TMP','COMSPEC','PATHEXT')}\n env['PATH']=os.environ['SystemRoot']+'\\\
         \\System32;'+os.environ['SystemRoot']\n result=subprocess.run([str(python),'-I','-B',str(workspace/'smoke-wheel-crt.py'),str(root)],capture_output=True,text=True,env=env,timeout=120,check=True)\n\
