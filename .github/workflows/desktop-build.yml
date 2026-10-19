@@ -82,28 +82,35 @@ jobs:
     - name: Apply isolated unsigned packaging and app-local CRT changes
       shell: bash
       run: "cat > bundle-crt.py <<'PYCRT'\n\"\"\"Copy unmodified licensed VS release CRT beside matching native consumers\
-        \ before sealing.\"\"\"\nimport os,sys,pathlib,shutil,hashlib,json\nimport pefile\nroot=pathlib.Path(sys.argv[1]).resolve();source=pathlib.Path(os.environ['DSH_CRT_SOURCE']).resolve()\n\
+        \ before sealing.\"\"\"\nimport os,sys,pathlib,shutil,hashlib,json,subprocess\nimport pefile\nroot=pathlib.Path(sys.argv[1]).resolve();source=pathlib.Path(os.environ['DSH_CRT_SOURCE']).resolve()\n\
         assert source.name=='Microsoft.VC143.CRT' and source.parent.name=='x64' and 'Redist' in source.parts and 'debug_nonredist'\
         \ not in str(source).lower()\nsources={arch:source.parent.parent/arch/source.name for arch in ('x64','x86','arm64')}\n\
         machines={0x8664:'x64',0x14c:'x86',0xaa64:'arm64'}\nfiles={arch:sorted(folder.glob('*.dll')) for arch,folder in sources.items()}\n\
-        names={p.name.lower() for group in files.values() for p in group};assert files['x64']\nconsumers=[];destinations={}\n\
-        for file in list(root.rglob('*')):\n if not file.is_file() or file.suffix.lower() not in ('.exe','.dll','.node','.pyd'):continue\n\
+        names={p.name.lower() for group in files.values() for p in group};assert files['x64']\nconsumers=[];destinations={};static_helpers=[]\n\
+        fastlist={\n 'fastlist-0.3.0-x64.exe':('d1a71f9ac1728082c1b276392725c3e010b98714888579b99152e401abedbf11',0x8664),\n\
+        \ 'fastlist-0.3.0-x86.exe':('017411f3b0b5c0402cc3b2cb87c32c6fc71abd82e5b17ea6108990096c75a65d',0x14c),\n}\nfor file\
+        \ in list(root.rglob('*')):\n if not file.is_file() or file.suffix.lower() not in ('.exe','.dll','.node','.pyd'):continue\n\
         \ try:pe=pefile.PE(str(file),fast_load=True)\n except pefile.PEFormatError:raise RuntimeError('Invalid native payload:\
         \ '+str(file.relative_to(root)))\n machine=pe.FILE_HEADER.Machine\n pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT'],pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT']])\n\
         \ deps=sorted({e.dll.decode('ascii').lower() for key in ('DIRECTORY_ENTRY_IMPORT','DIRECTORY_ENTRY_DELAY_IMPORT')\
-        \ for e in getattr(pe,key,[])})\n needed=[n for n in deps if n in names];pe.close()\n missing=[n for n in deps if\
-        \ n.startswith(('vcruntime140','msvcp140','concrt140','vccorlib140','vcomp140')) and n not in names]\n if missing:raise\
-        \ RuntimeError('CRT dependency outside approved release closure: '+str(missing))\n if file.suffix.lower()=='.exe'\
-        \ or needed:\n  arch=machines.get(machine)\n  if arch is None or not files.get(arch):raise RuntimeError('Unsupported\
-        \ CRT consumer architecture: '+str(file.relative_to(root))+' '+hex(machine))\n  if any(n not in {p.name.lower() for\
-        \ p in files[arch]} for n in needed):raise RuntimeError('Architecture-specific CRT dependency missing')\n  if file.parent\
-        \ in destinations and destinations[file.parent]!=arch:raise RuntimeError('Mixed architecture CRT directory: '+str(file.parent.relative_to(root)))\n\
-        \  destinations[file.parent]=arch;consumers.append({'file':str(file.relative_to(root)),'architecture':arch,'crtImports':needed})\n\
+        \ for e in getattr(pe,key,[])})\n delay=bool(getattr(pe,'DIRECTORY_ENTRY_DELAY_IMPORT',[]))\n needed=[n for n in deps\
+        \ if n in names];pe.close()\n if file.name in fastlist and file.relative_to(root).parent.as_posix()=='dependencies/pnpm/dist/vendor':\n\
+        \  expected_hash,expected_machine=fastlist[file.name]\n  actual_hash=hashlib.sha256(file.read_bytes()).hexdigest()\n\
+        \  assert actual_hash==expected_hash and machine==expected_machine and deps==['kernel32.dll'] and not delay,'Pinned\
+        \ static helper changed'\n  result=subprocess.run([str(file)],capture_output=True,timeout=30,check=True)\n  assert\
+        \ result.stdout.strip(),'Static process helper smoke produced no output'\n  static_helpers.append({'file':file.relative_to(root).as_posix(),'sha256':actual_hash,'architecture':machines[machine],'imports':deps,'nativeSmoke':True,'source':'https://github.com/MarkTiedemann/fastlist/tree/v0.3.0','runtime':'statically\
+        \ linked; no imported CRT'})\n  continue\n missing=[n for n in deps if n.startswith(('vcruntime140','msvcp140','concrt140','vccorlib140','vcomp140'))\
+        \ and n not in names]\n if missing:raise RuntimeError('CRT dependency outside approved release closure: '+str(missing))\n\
+        \ if file.suffix.lower()=='.exe' or needed:\n  arch=machines.get(machine)\n  if arch is None or not files.get(arch):raise\
+        \ RuntimeError('Unsupported CRT consumer architecture: '+str(file.relative_to(root))+' '+hex(machine))\n  if any(n\
+        \ not in {p.name.lower() for p in files[arch]} for n in needed):raise RuntimeError('Architecture-specific CRT dependency\
+        \ missing')\n  if file.parent in destinations and destinations[file.parent]!=arch:raise RuntimeError('Mixed architecture\
+        \ CRT directory: '+str(file.parent.relative_to(root)))\n  destinations[file.parent]=arch;consumers.append({'file':str(file.relative_to(root)),'architecture':arch,'crtImports':needed})\n\
         for destination,arch in destinations.items():\n for file in files[arch]:\n  pe=pefile.PE(str(file),fast_load=True);actual=machines.get(pe.FILE_HEADER.Machine);pe.close()\n\
         \  if actual!=arch:raise RuntimeError('Redistributable machine mismatch: '+file.name)\n  shutil.copy2(file,destination/file.name)\n\
         sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()\nrecord={'source':'Visual Studio licensed GitHub hosted runner\
         \ VC/Redist/MSVC/'+source.parent.parent.name,'redistribution':'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution','files':{arch:{p.name:sha(p)\
-        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'destinations':{str(p.relative_to(root)):arch\
+        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'staticHelpers':static_helpers,'destinations':{str(p.relative_to(root)):arch\
         \ for p,arch in destinations.items()}}\n(root/'app-local-crt.json').write_text(json.dumps(record,indent=2))\n(root/'MICROSOFT-CRT-NOTICE.txt').write_text('Microsoft\
         \ Visual C++ release runtime. Copyright Microsoft Corporation. Unmodified REDIST files from licensed Visual Studio\
         \ on GitHub hosted runners.\\nRedistribution conditions: https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution\\\
