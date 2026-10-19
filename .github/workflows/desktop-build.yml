@@ -543,11 +543,14 @@ jobs:
         \ root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-desktop-gui-qa-'));\nconst home = path.join(root, 'home');\nconst\
         \ userData = path.join(root, 'electron-user-data');\nconst dshHome = path.join(root, 'dsh-home');\nfor (const p of\
         \ [home, userData, dshHome, path.join(root, 'appdata'), path.join(root, 'localappdata')]) fs.mkdirSync(p, { recursive:\
-        \ true });\nconst env = {};\n// Explicit allowlist: do not pass provider credentials, CI tokens, NODE_OPTIONS or Electron\
-        \ Node mode.\nfor (const [key, value] of Object.entries(process.env)) {\n  if (/^(SystemRoot|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_ALL|LC_CTYPE|TZ|DISPLAY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|SystemDrive|PROCESSOR_ARCHITECTURE|NUMBER_OF_PROCESSORS)$/i.test(key)\
+        \ true });\nconst windowsPowerShell = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32',\
+        \ 'WindowsPowerShell', 'v1.0') : undefined;\nif (windowsPowerShell) assert.ok(fs.statSync(path.join(windowsPowerShell,\
+        \ 'powershell.exe')).isFile(), 'Required Windows OS PowerShell executable is unavailable');\nconst env = {};\n// Explicit\
+        \ allowlist: do not pass provider credentials, CI tokens, NODE_OPTIONS or Electron Node mode.\nfor (const [key, value]\
+        \ of Object.entries(process.env)) {\n  if (/^(SystemRoot|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|TMPDIR|LANG|LC_ALL|LC_CTYPE|TZ|DISPLAY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|SystemDrive|PROCESSOR_ARCHITECTURE|NUMBER_OF_PROCESSORS)$/i.test(key)\
         \ && value) env[key] = value;\n}\nObject.assign(env, {\n  HOME: home, USERPROFILE: home, APPDATA: path.join(root,\
         \ 'appdata'), LOCALAPPDATA: path.join(root, 'localappdata'),\n  DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: '1', DSH_TELEMETRY_MODE:\
-        \ 'DISABLED',\n  PATH: process.platform === 'win32' ? `${process.env.SystemRoot}\\\\System32;${process.env.SystemRoot}`\
+        \ 'DISABLED',\n  PATH: process.platform === 'win32' ? `${process.env.SystemRoot}\\\\System32;${process.env.SystemRoot};${windowsPowerShell}`\
         \ : '/usr/bin:/bin:/usr/sbin:/sbin',\n});\nconst report = {\n  schemaVersion: 1, startedAt: new Date().toISOString(),\
         \ platform: process.platform, architecture: process.arch,\n  executableSha256: crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),\n\
         \  passed: false, tests: [], limitations: [\n    'Not a pristine OS: native runner may have system runtime libraries\
@@ -592,14 +595,21 @@ jobs:
         \      }\n    } catch (error) { entry.diagnosticError = safeText(error.message || error); }\n  }\n}\nasync function\
         \ until(fn, description, timeout = 120000) {\n  const deadline = Date.now() + timeout;\n  while (Date.now() < deadline)\
         \ { const value = await fn(); if (value) return value; await sleep(250); }\n  throw Error(`Timeout: ${description}`);\n\
-        }\nasync function launch() {\n  launchNumber++;\n  app = await _electron.launch({ executablePath: executable, args:\
-        \ [`--user-data-dir=${userData}`, '--lang=en-US'], env, timeout: 120000 });\n  app.on('window', watchPage);\n  for\
-        \ (const page of app.windows()) watchPage(page);\n  const identity = await app.evaluate(({ app }) => ({ packaged:\
-        \ app.isPackaged, name: app.getName(), version: app.getVersion(), execPath: process.execPath, userData: app.getPath('userData'),\
-        \ nodeMode: process.env.ELECTRON_RUN_AS_NODE || '', home: process.env.DSH_HOME }));\n  assert.equal(identity.packaged,\
-        \ true, 'Must launch packaged Electron app, not development shell');\n  assert.match(identity.name, /deepseek|dsh-desktop/i,\
-        \ 'Unexpected desktop app identity');\n  assert.equal(canonical(identity.execPath), canonical(executable), 'Wrong\
-        \ executable');\n  assert.equal(canonical(identity.userData), canonical(userData), 'userData isolation failed');\n\
+        }\nfunction verifyWindowsDocumentsLookup() {\n  if (process.platform !== 'win32') return;\n  // Match the shipped\
+        \ default-directory resolver using only the sanitized OS PATH.\n  const script = '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);\
+        \ [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments, [Environment+SpecialFolderOption]::DoNotVerify)';\n\
+        \  const documents = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],\
+        \ { env, encoding: 'utf8', timeout: 30000, windowsHide: true }).replace(/[\\r\\n]+$/, '');\n  const driveRoot = path.win32.parse(documents).root;\n\
+        \  assert.ok(documents && path.win32.isAbsolute(documents) && driveRoot !== '\\\\' && driveRoot !== '/', 'OS Documents\
+        \ lookup must return a fully qualified directory');\n  record('windows-os-documents-lookup', { executableAvailable:\
+        \ true, fullyQualifiedDocumentsDirectory: true });\n}\nasync function launch() {\n  launchNumber++;\n  app = await\
+        \ _electron.launch({ executablePath: executable, args: [`--user-data-dir=${userData}`, '--lang=en-US'], env, timeout:\
+        \ 120000 });\n  app.on('window', watchPage);\n  for (const page of app.windows()) watchPage(page);\n  const identity\
+        \ = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, name: app.getName(), version: app.getVersion(), execPath:\
+        \ process.execPath, userData: app.getPath('userData'), nodeMode: process.env.ELECTRON_RUN_AS_NODE || '', home: process.env.DSH_HOME\
+        \ }));\n  assert.equal(identity.packaged, true, 'Must launch packaged Electron app, not development shell');\n  assert.match(identity.name,\
+        \ /deepseek|dsh-desktop/i, 'Unexpected desktop app identity');\n  assert.equal(canonical(identity.execPath), canonical(executable),\
+        \ 'Wrong executable');\n  assert.equal(canonical(identity.userData), canonical(userData), 'userData isolation failed');\n\
         \  assert.equal(canonical(identity.home), canonical(dshHome), 'DSH_HOME isolation failed');\n  assert.equal(identity.nodeMode,\
         \ '', 'Electron must not run as Node');\n  await app.evaluate(({ session }) => {\n    session.defaultSession.webRequest.onBeforeRequest((details,\
         \ callback) => {\n      let allowed = false;\n      try { const u = new URL(details.url); allowed = ['file:', 'dsh-app:',\
@@ -646,22 +656,22 @@ jobs:
         \ ${module.name}`);\n    module.file = rel; // Do not publish absolute machine/user paths.\n  }\n  record('observed-crt-app-local',\
         \ { launch: index, modules, qualification: modules.length ? 'observed modules all app-local' : 'no matching CRT module\
         \ loaded; not proof of dependency absence' });\n}\nasync function close() { if (app) { const current = app; await\
-        \ current.close(); app = undefined; } }\n(async () => {\n  try {\n    await launch();\n    let page = await workspace();\n\
-        \    await editAndClear(page, 1);\n    const marker = crypto.randomUUID();\n    await page.evaluate(value => localStorage.setItem('dsh-release-qa-storage-marker',\
-        \ value), marker);\n    captureCRT(app.process().pid, 1);\n    await close();\n    await launch();\n    page = await\
-        \ workspace();\n    assert.equal(await page.evaluate(() => localStorage.getItem('dsh-release-qa-storage-marker')),\
-        \ marker, 'Renderer storage did not survive native app restart');\n    await page.evaluate(() => localStorage.removeItem('dsh-release-qa-storage-marker'));\n\
-        \    record('same-profile-restart-storage');\n    if (previewAcknowledgedOnFirstLaunch) record('preview-notice-acknowledgement-persisted');\n\
-        \    await editAndClear(page, 2);\n    captureCRT(app.process().pid, 2);\n    await close();\n    report.passed =\
-        \ true;\n  } catch (error) {\n    // Do not dump arbitrary app logs or URLs containing tokens. Screenshots contain\
-        \ synthetic QA only.\n    report.error = safeText(error.message || error);\n    try { await failureDiagnostics();\
-        \ } catch (diagnosticError) { report.diagnosticError = safeText(diagnosticError.message || diagnosticError); }\n \
-        \   process.exitCode = 1;\n    try { await close(); } catch { report.cleanupError = 'Application failed graceful close;\
-        \ runner must terminate only this QA process tree.'; }\n  } finally {\n    report.completedAt = new Date().toISOString();\n\
-        \    fs.writeFileSync(path.join(output, 'desktop-qa.json'), JSON.stringify(report, null, 2) + '\\n');\n    // Keep\
-        \ isolated profile local for diagnosis; NEVER upload it (may contain generated local auth/session state).\n    console.log(JSON.stringify({\
-        \ passed: report.passed, tests: report.tests.length, report: path.join(output, 'desktop-qa.json') }));\n  }\n})();\n\
-        \nJS\n"
+        \ current.close(); app = undefined; } }\n(async () => {\n  try {\n    verifyWindowsDocumentsLookup();\n    await launch();\n\
+        \    let page = await workspace();\n    await editAndClear(page, 1);\n    const marker = crypto.randomUUID();\n  \
+        \  await page.evaluate(value => localStorage.setItem('dsh-release-qa-storage-marker', value), marker);\n    captureCRT(app.process().pid,\
+        \ 1);\n    await close();\n    await launch();\n    page = await workspace();\n    assert.equal(await page.evaluate(()\
+        \ => localStorage.getItem('dsh-release-qa-storage-marker')), marker, 'Renderer storage did not survive native app\
+        \ restart');\n    await page.evaluate(() => localStorage.removeItem('dsh-release-qa-storage-marker'));\n    record('same-profile-restart-storage');\n\
+        \    if (previewAcknowledgedOnFirstLaunch) record('preview-notice-acknowledgement-persisted');\n    await editAndClear(page,\
+        \ 2);\n    captureCRT(app.process().pid, 2);\n    await close();\n    report.passed = true;\n  } catch (error) {\n\
+        \    // Do not dump arbitrary app logs or URLs containing tokens. Screenshots contain synthetic QA only.\n    report.error\
+        \ = safeText(error.message || error);\n    try { await failureDiagnostics(); } catch (diagnosticError) { report.diagnosticError\
+        \ = safeText(diagnosticError.message || diagnosticError); }\n    process.exitCode = 1;\n    try { await close(); }\
+        \ catch { report.cleanupError = 'Application failed graceful close; runner must terminate only this QA process tree.';\
+        \ }\n  } finally {\n    report.completedAt = new Date().toISOString();\n    fs.writeFileSync(path.join(output, 'desktop-qa.json'),\
+        \ JSON.stringify(report, null, 2) + '\\n');\n    // Keep isolated profile local for diagnosis; NEVER upload it (may\
+        \ contain generated local auth/session state).\n    console.log(JSON.stringify({ passed: report.passed, tests: report.tests.length,\
+        \ report: path.join(output, 'desktop-qa.json') }));\n  }\n})();\n\nJS\n"
     - name: Install exact Windows EXE, launch native UI twice and uninstall
       if: runner.os == 'Windows'
       shell: pwsh
