@@ -14,6 +14,7 @@ concurrency:
 env:
   SOURCE_SHA: bb8e649df3c976c9cd965037593f353009992ae3
   DSH_TELEMETRY_DISABLED: '1'
+  PYTHONUTF8: '1'
 jobs:
   build:
     strategy:
@@ -254,29 +255,30 @@ jobs:
         \ localStorage; it does not claim unsent conversation draft persistence.',\n    'NSIS installation/uninstallation\
         \ is a separate test, not established by this executable launch.',\n  ],\n};\nlet app;\nlet launchNumber = 0;\nlet\
         \ previewAcknowledged = false;\nlet previewAcknowledgedOnFirstLaunch = false;\nconst sleep = ms => new Promise(r =>\
-        \ setTimeout(r, ms));\nconst canonical = p => process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);\n\
-        function record(name, details = {}) { report.tests.push({ name, passed: true, ...details }); }\nasync function until(fn,\
-        \ description, timeout = 120000) {\n  const deadline = Date.now() + timeout;\n  while (Date.now() < deadline) { const\
-        \ value = await fn(); if (value) return value; await sleep(250); }\n  throw Error(`Timeout: ${description}`);\n}\n\
-        async function launch() {\n  launchNumber++;\n  app = await _electron.launch({ executablePath: executable, args: [`--user-data-dir=${userData}`,\
-        \ '--lang=en-US'], env, timeout: 120000 });\n  const identity = await app.evaluate(({ app }) => ({ packaged: app.isPackaged,\
-        \ name: app.getName(), version: app.getVersion(), execPath: process.execPath, userData: app.getPath('userData'), nodeMode:\
-        \ process.env.ELECTRON_RUN_AS_NODE || '', home: process.env.DSH_HOME }));\n  assert.equal(identity.packaged, true,\
-        \ 'Must launch packaged Electron app, not development shell');\n  assert.match(identity.name, /deepseek|dsh-desktop/i,\
-        \ 'Unexpected desktop app identity');\n  assert.equal(canonical(identity.execPath), canonical(executable), 'Wrong\
-        \ executable');\n  assert.equal(canonical(identity.userData), canonical(userData), 'userData isolation failed');\n\
-        \  assert.equal(canonical(identity.home), canonical(dshHome), 'DSH_HOME isolation failed');\n  assert.equal(identity.nodeMode,\
-        \ '', 'Electron must not run as Node');\n  await app.evaluate(({ session }) => {\n    session.defaultSession.webRequest.onBeforeRequest((details,\
-        \ callback) => {\n      let allowed = false;\n      try { const u = new URL(details.url); allowed = ['file:', 'dsh-app:',\
-        \ 'devtools:', 'data:', 'blob:'].includes(u.protocol) || (['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol)\
-        \ && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)); } catch {}\n      callback({ cancel: !allowed });\n\
-        \    });\n  });\n  record('packaged-native-identity', { name: identity.name, version: identity.version });\n  return\
-        \ identity;\n}\nasync function workspace() {\n  let clickedKey = false, clickedSkip = false;\n  let firstWorkspaceSeenAt\
-        \ = 0;\n  return until(async () => {\n    for (const page of app.windows()) {\n      if (page.isClosed()) continue;\n\
-        \      // Welcome is a real shipped local document. Never enter or synthesize credentials.\n      if (/\\/welcome\\\
-        .html(?:$|[?#])/.test(page.url())) {\n        if (!clickedKey && await page.locator('#api-key').isVisible().catch(()\
-        \ => false)) { await page.locator('#api-key').click(); clickedKey = true; }\n        if (!clickedSkip && await page.locator('#skip-key').isVisible().catch(()\
-        \ => false)) { await page.locator('#skip-key').click(); clickedSkip = true; }\n      }\n      if (page.url().startsWith('dsh-app://app/'))\
+        \ setTimeout(r, ms));\nconst canonical = p => { const resolved = fs.realpathSync.native(path.resolve(p)); return process.platform\
+        \ === 'win32' ? resolved.toLowerCase() : resolved; };\nfunction record(name, details = {}) { report.tests.push({ name,\
+        \ passed: true, ...details }); }\nasync function until(fn, description, timeout = 120000) {\n  const deadline = Date.now()\
+        \ + timeout;\n  while (Date.now() < deadline) { const value = await fn(); if (value) return value; await sleep(250);\
+        \ }\n  throw Error(`Timeout: ${description}`);\n}\nasync function launch() {\n  launchNumber++;\n  app = await _electron.launch({\
+        \ executablePath: executable, args: [`--user-data-dir=${userData}`, '--lang=en-US'], env, timeout: 120000 });\n  const\
+        \ identity = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, name: app.getName(), version: app.getVersion(),\
+        \ execPath: process.execPath, userData: app.getPath('userData'), nodeMode: process.env.ELECTRON_RUN_AS_NODE || '',\
+        \ home: process.env.DSH_HOME }));\n  assert.equal(identity.packaged, true, 'Must launch packaged Electron app, not\
+        \ development shell');\n  assert.match(identity.name, /deepseek|dsh-desktop/i, 'Unexpected desktop app identity');\n\
+        \  assert.equal(canonical(identity.execPath), canonical(executable), 'Wrong executable');\n  assert.equal(canonical(identity.userData),\
+        \ canonical(userData), 'userData isolation failed');\n  assert.equal(canonical(identity.home), canonical(dshHome),\
+        \ 'DSH_HOME isolation failed');\n  assert.equal(identity.nodeMode, '', 'Electron must not run as Node');\n  await\
+        \ app.evaluate(({ session }) => {\n    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {\n\
+        \      let allowed = false;\n      try { const u = new URL(details.url); allowed = ['file:', 'dsh-app:', 'devtools:',\
+        \ 'data:', 'blob:'].includes(u.protocol) || (['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol) && ['127.0.0.1',\
+        \ 'localhost', '[::1]'].includes(u.hostname)); } catch {}\n      callback({ cancel: !allowed });\n    });\n  });\n\
+        \  record('packaged-native-identity', { name: identity.name, version: identity.version });\n  return identity;\n}\n\
+        async function workspace() {\n  let clickedKey = false, clickedSkip = false;\n  let firstWorkspaceSeenAt = 0;\n  return\
+        \ until(async () => {\n    for (const page of app.windows()) {\n      if (page.isClosed()) continue;\n      // Welcome\
+        \ is a real shipped local document. Never enter or synthesize credentials.\n      if (/\\/welcome\\.html(?:$|[?#])/.test(page.url()))\
+        \ {\n        if (!clickedKey && await page.locator('#api-key').isVisible().catch(() => false)) { await page.locator('#api-key').click();\
+        \ clickedKey = true; }\n        if (!clickedSkip && await page.locator('#skip-key').isVisible().catch(() => false))\
+        \ { await page.locator('#skip-key').click(); clickedSkip = true; }\n      }\n      if (page.url().startsWith('dsh-app://app/'))\
         \ {\n        if (!firstWorkspaceSeenAt) firstWorkspaceSeenAt = Date.now();\n        const notice = page.getByRole('dialog').filter({\
         \ has: page.getByRole('heading', { name: /^(Preview Notice|\u9884\u89C8\u7248\u8BF4\u660E)$/ }) });\n        if (await\
         \ notice.isVisible().catch(() => false)) {\n          assert.ok(!(launchNumber > 1 && previewAcknowledged), 'Preview\
