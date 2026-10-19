@@ -95,11 +95,13 @@ jobs:
         \ 'fastlist-0.3.0-x86.exe':('017411f3b0b5c0402cc3b2cb87c32c6fc71abd82e5b17ea6108990096c75a65d',0x14c),\n}\nwheel_receipt=None;wheel_consumers={}\n\
         workspace=pathlib.Path(os.environ['GITHUB_WORKSPACE'])\nif (root/'dependencies/python/Lib/site-packages/numpy.libs/msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll').is_file():\n\
         \ subprocess.run([sys.executable,str(workspace/'verify-wheel-crt.py'),str(root)],check=True,timeout=240)\n wheel_receipt=json.loads((root/'verified-wheel-crt.json').read_text())\n\
-        \ wheel_consumers={c['path']:c for c in wheel_receipt['allowedConsumers']}\nfor file in list(root.rglob('*')):\n if\
-        \ not file.is_file() or file.suffix.lower() not in ('.exe','.dll','.node','.pyd'):continue\n relative=file.relative_to(root).as_posix()\n\
-        \ if relative in non_windows:\n  expected=non_windows[relative];data=file.read_bytes()\n  assert len(data)==expected['size']\
-        \ and data[:32].hex()==expected['headerHex'] and hashlib.sha256(data).hexdigest()==expected['sha256'],'Pinned non-Windows\
-        \ payload changed'\n  non_windows_assets.append({'file':relative,**expected,'format':'Mach-O64-LE','source':'https://registry.npmjs.org/pnpm/-/pnpm-11.28.5.tgz'})\n\
+        \ wheel_consumers={c['path']:c for c in wheel_receipt['allowedConsumers']}\ndistlib_receipt=None;distlib_paths=set()\n\
+        if (root/'dependencies/python/Lib/site-packages/pip/_vendor/distlib/t64.exe').is_file():\n subprocess.run([sys.executable,str(workspace/'verify-distlib.py'),str(root)],check=True,timeout=120)\n\
+        \ distlib_receipt=json.loads((root/'verified-distlib.json').read_text())\n distlib_paths={c['path'] for c in distlib_receipt['launchers']}\n\
+        for file in list(root.rglob('*')):\n if not file.is_file() or file.suffix.lower() not in ('.exe','.dll','.node','.pyd'):continue\n\
+        \ relative=file.relative_to(root).as_posix()\n if relative in distlib_paths:continue\n if relative in non_windows:\n\
+        \  expected=non_windows[relative];data=file.read_bytes()\n  assert len(data)==expected['size'] and data[:32].hex()==expected['headerHex']\
+        \ and hashlib.sha256(data).hexdigest()==expected['sha256'],'Pinned non-Windows payload changed'\n  non_windows_assets.append({'file':relative,**expected,'format':'Mach-O64-LE','source':'https://registry.npmjs.org/pnpm/-/pnpm-11.28.5.tgz'})\n\
         \  continue\n try:pe=pefile.PE(str(file),fast_load=True)\n except pefile.PEFormatError:raise RuntimeError('Invalid\
         \ native payload: '+str(file.relative_to(root)))\n machine=pe.FILE_HEADER.Machine\n pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT'],pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT']])\n\
         \ deps=sorted({e.dll.decode('ascii').lower() for key in ('DIRECTORY_ENTRY_IMPORT','DIRECTORY_ENTRY_DELAY_IMPORT')\
@@ -126,9 +128,14 @@ jobs:
         \\System32;'+os.environ['SystemRoot']\n result=subprocess.run([str(python),'-I','-B',str(workspace/'smoke-wheel-crt.py'),str(root)],capture_output=True,text=True,env=env,timeout=120,check=True)\n\
         \ proof=json.loads(result.stdout);assert proof['passed'] is True\n evidence=workspace/'desktop-qa-results';evidence.mkdir(exist_ok=True)\n\
         \ (evidence/'wheel-crt-runtime.json').write_text(json.dumps(proof,indent=2))\n (evidence/'verified-wheel-crt.json').write_text(json.dumps(wheel_receipt,indent=2))\n\
+        if distlib_receipt is not None:\n python=root/'dependencies/python/python.exe';assert python.is_file()\n env={k:v\
+        \ for k,v in os.environ.items() if k.upper() in ('SYSTEMROOT','WINDIR','TEMP','TMP','COMSPEC','PATHEXT')}\n env['PATH']=os.environ['SystemRoot']+'\\\
+        \\System32;'+os.environ['SystemRoot']\n result=subprocess.run([str(python),'-I','-B',str(workspace/'smoke-distlib.py'),str(root)],capture_output=True,text=True,env=env,timeout=120,check=True)\n\
+        \ proof=json.loads(result.stdout);assert proof['passed'] is True\n evidence=workspace/'desktop-qa-results';evidence.mkdir(exist_ok=True)\n\
+        \ (evidence/'distlib-runtime.json').write_text(json.dumps(proof,indent=2))\n (evidence/'verified-distlib.json').write_text(json.dumps(distlib_receipt,indent=2))\n\
         sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()\nrecord={'source':'Visual Studio licensed GitHub hosted runner\
         \ VC/Redist/MSVC/'+source.parent.parent.name,'redistribution':'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution','files':{arch:{p.name:sha(p)\
-        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'staticHelpers':static_helpers,'nonWindowsAssets':non_windows_assets,'destinations':{str(p.relative_to(root)):arch\
+        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'staticHelpers':static_helpers,'distlibTemplates':distlib_receipt,'nonWindowsAssets':non_windows_assets,'destinations':{str(p.relative_to(root)):arch\
         \ for p,arch in destinations.items()}}\n(root/'app-local-crt.json').write_text(json.dumps(record,indent=2))\n(root/'MICROSOFT-CRT-NOTICE.txt').write_text('Microsoft\
         \ Visual C++ release runtime. Copyright Microsoft Corporation. Unmodified REDIST files from licensed Visual Studio\
         \ on GitHub hosted runners.\\nRedistribution conditions: https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution\\\
@@ -306,7 +313,68 @@ jobs:
         \ 0<n<len(buf)\n path=pathlib.Path(buf.value).resolve();assert path.is_relative_to(root),'DLL loaded outside bundled\
         \ runtime: '+name\n if name==alias:assert path in {root/'dependencies/python/Lib/site-packages'/f'{package}.libs'/alias\
         \ for package in ('numpy','pandas')}\n modules.append({'name':name,'path':path.relative_to(root).as_posix()})\nprint(json.dumps({'passed':True,'numpyFFT':True,'pandasRolling':True,'modules':modules}))\n\
-        \nPYSMOKE\n"
+        \nPYSMOKE\ncat > verify-distlib.py <<'PYDISTVERIFY'\n\"\"\"Read-only validation of six fixed pip/distlib packaging\
+        \ resources.\"\"\"\nimport hashlib,json,pathlib,sys\nimport pefile\nroot=pathlib.Path(sys.argv[1]).resolve()\ninv=json.loads(pathlib.Path(__file__).with_name('distlib-launcher-inventory.json').read_text())\n\
+        def require(ok,label):\n if not ok:raise RuntimeError('distlib resource validation failed: '+label)\ndef checked(rel,digest):\n\
+        \ p=root/rel;require(p.is_file() and p.resolve().is_relative_to(root),rel+' containment');require(hashlib.sha256(p.read_bytes()).hexdigest()==digest,rel+'\
+        \ SHA256');return p\nfolder=root/'dependencies/python/Lib/site-packages/pip/_vendor/distlib'\nrequire({p.name for\
+        \ p in folder.glob('*.exe')}=={pathlib.PurePosixPath(x['path']).name for x in inv['launchers']},'exact six resource\
+        \ set')\nfor key in ('selector','license'):checked(inv[key]['path'],inv[key]['sha256'])\nmetadata=root/f\"dependencies/python/Lib/site-packages/pip-{inv['pip']}.dist-info/METADATA\"\
+        \nrequire(metadata.is_file() and ('\\nVersion: '+inv['pip']+'\\n') in metadata.read_text(encoding='utf8'),'pip identity')\n\
+        require(('distlib=='+inv['distlib']) in (folder.parent/'vendor.txt').read_text(encoding='utf8').splitlines(),'distlib\
+        \ identity')\nfor row in inv['launchers']:\n p=checked(row['path'],row['sha256']);require(p.stat().st_size==row['size'],row['path']+'\
+        \ size')\n pe=pefile.PE(str(p),fast_load=True);pe.parse_data_directories(directories=[1,13]);deps=sorted({d.dll.decode('ascii').lower()\
+        \ for d in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[])})\n require(pe.FILE_HEADER.Machine==row['machine'],row['path']+'\
+        \ machine')\n require(deps==sorted(d.lower() for d in row['imports']),row['path']+' imports')\n require(not getattr(pe,'DIRECTORY_ENTRY_DELAY_IMPORT',[])\
+        \ and pe.OPTIONAL_HEADER.DATA_DIRECTORY[13].VirtualAddress==0 and pe.OPTIONAL_HEADER.DATA_DIRECTORY[13].Size==0,row['path']+'\
+        \ delay imports');pe.close()\nreceipt={**inv,'verified':True,'purpose':'unchanged architecture-selectable static launcher\
+        \ templates; not executable-host CRT directories','requiresNativeLauncherQa':True}\n(root/'verified-distlib.json').write_text(json.dumps(receipt,indent=2)+'\\\
+        n',encoding='utf8')\nprint(json.dumps({'verified':True,'launchers':len(inv['launchers']),'receipt':'verified-distlib.json'}))\n\
+        \nPYDISTVERIFY\ncat > smoke-distlib.py <<'PYDISTSMOKE'\n\"\"\"Generate and exercise native console and GUI launchers\
+        \ with the bundled Python.\"\"\"\nimport hashlib,json,os,pathlib,struct,subprocess,sys,tempfile\nfrom pip._vendor.distlib.scripts\
+        \ import ScriptMaker\nroot=pathlib.Path(sys.argv[1]).resolve()\ndef require(ok,label):\n if not ok:raise RuntimeError('distlib\
+        \ native QA failed: '+label)\nrequire(os.name=='nt' and struct.calcsize('P')==8,'Windows x64 runtime')\nrequire(pathlib.Path(sys.executable).resolve()==root/'dependencies/python/python.exe','bundled\
+        \ Python executable')\nreceipt=json.loads((root/'verified-distlib.json').read_text());require(receipt.get('verified')\
+        \ is True,'fresh verification receipt')\nrows={pathlib.PurePosixPath(x['path']).name:x for x in receipt['launchers']}\n\
+        proof=[]\nwith tempfile.TemporaryDirectory(prefix='distlib-launcher-qa-') as work:\n work=pathlib.Path(work)\n for\
+        \ kind,gui in [('console',False),('gui',True)]:\n  marker=work/(kind+'.json');maker=ScriptMaker(None,str(work));maker.variants={''};maker.executable=str(root/'dependencies/python/python.exe')\n\
+        \  # Custom script body avoids importing any temporary module or relying on PYTHONPATH.\n  maker.script_template='import\
+        \ json,pathlib,sys\\npathlib.Path('+repr(str(marker))+').write_text(json.dumps({\"marker\":\"distlib-'+kind+'-ok\"\
+        ,\"executable\":sys.executable,\"value\":6*7}),encoding=\"utf8\")\\n'\n  outputs=maker.make('qa-'+kind+' = sys:exit',options={'gui':gui,'interpreter_args':['-I','-B']})\n\
+        \  require(len(outputs)==1,'one generated launcher');exe=pathlib.Path(outputs[0]);template=root/rows['w64.exe' if\
+        \ gui else 't64.exe']['path'];raw=template.read_bytes()\n  require(exe.read_bytes().startswith(raw),'exact verified\
+        \ x64 launcher template')\n  require(hashlib.sha256(raw).hexdigest()==rows[template.name]['sha256'],'unchanged template')\n\
+        \  subprocess.run([str(exe)],cwd=str(work),check=True,capture_output=True,timeout=60)\n  require(marker.is_file(),'deterministic\
+        \ output marker');v=json.loads(marker.read_text(encoding='utf8'))\n  expected_python=root/'dependencies/python'/('pythonw.exe'\
+        \ if gui else 'python.exe')\n  # An explicit maker.executable may retain python.exe for GUI; both must stay bundled.\n\
+        \  require(pathlib.Path(v['executable']).resolve() in {expected_python,root/'dependencies/python/python.exe'},'bundled\
+        \ child interpreter')\n  require(v['marker']=='distlib-'+kind+'-ok' and v['value']==42,'child result')\n  proof.append({'kind':kind,'template':template.relative_to(root).as_posix(),'childInterpreter':pathlib.Path(v['executable']).resolve().relative_to(root).as_posix(),'passed':True})\n\
+        print(json.dumps({'passed':True,'launchers':proof}))\n\nPYDISTSMOKE\ncat > distlib-launcher-inventory.json <<'DISTJSON'\n\
+        {\n  \"pythonArchiveSha256\": \"7c45c9622400d578709a9b2cddbe8124cc21d382409d9f13406d706d28e31b14\",\n  \"pip\": \"\
+        26.2.1\",\n  \"launchers\": [\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/t32.exe\"\
+        ,\n      \"sha256\": \"5fd873e09786a1eaabaa44261e9e30609d88745da040ebb702c1a5069ab345ca\",\n      \"size\": 97792,\n\
+        \      \"machine\": 332,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"SHLWAPI.dll\"\n      ],\n   \
+        \   \"delayDirectory\": [\n        0,\n        0\n      ]\n    },\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/t64-arm.exe\"\
+        ,\n      \"sha256\": \"81f7936c6d05cadd4a185bb9a8a64abe9a72c937ad979ea5afe672de59123fcc\",\n      \"size\": 182784,\n\
+        \      \"machine\": 43620,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"SHLWAPI.dll\"\n      ],\n \
+        \     \"delayDirectory\": [\n        0,\n        0\n      ]\n    },\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/t64.exe\"\
+        ,\n      \"sha256\": \"acd47a82dc01132e3b8414f683c2e117c18aedbf650a370249fe9fdbc445cda1\",\n      \"size\": 108032,\n\
+        \      \"machine\": 34404,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"SHLWAPI.dll\"\n      ],\n \
+        \     \"delayDirectory\": [\n        0,\n        0\n      ]\n    },\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/w32.exe\"\
+        ,\n      \"sha256\": \"f27b3724964ff524e837374847d2856f7d10a884516fc34200d0a2332a739789\",\n      \"size\": 91648,\n\
+        \      \"machine\": 332,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"USER32.dll\",\n        \"SHLWAPI.dll\"\
+        \n      ],\n      \"delayDirectory\": [\n        0,\n        0\n      ]\n    },\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/w64-arm.exe\"\
+        ,\n      \"sha256\": \"f6704d3a1022f69ad6b7e604a927d00ce2f9dae515bfad5a7df9a2e3e4bd2448\",\n      \"size\": 168448,\n\
+        \      \"machine\": 43620,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"USER32.dll\",\n        \"SHLWAPI.dll\"\
+        \n      ],\n      \"delayDirectory\": [\n        0,\n        0\n      ]\n    },\n    {\n      \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/w64.exe\"\
+        ,\n      \"sha256\": \"55b21889fd3d28799b834fba3d29482e7aa1b0519864b790e3914af7cdda666b\",\n      \"size\": 101888,\n\
+        \      \"machine\": 34404,\n      \"imports\": [\n        \"KERNEL32.dll\",\n        \"USER32.dll\",\n        \"SHLWAPI.dll\"\
+        \n      ],\n      \"delayDirectory\": [\n        0,\n        0\n      ]\n    }\n  ],\n  \"distlib\": \"0.4.2\",\n\
+        \  \"source\": \"https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-x86_64-pc-windows-msvc-install_only_stripped.tar.gz\"\
+        ,\n  \"launcherSource\": \"https://raw.githubusercontent.com/pypa/distlib/0.4.2/PC/launcher.c\",\n  \"selector\":\
+        \ {\n    \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/scripts.py\",\n    \"sha256\": \"ad59b803e61f1900e9b0e4703b2ec0c1ea724536b2bb2eab73e32768230101c3\"\
+        \n  },\n  \"license\": {\n    \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/LICENSE.txt\"\
+        ,\n    \"sha256\": \"808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d\"\n  }\n}\n\nDISTJSON\n"
     - name: Observe actual Office helper CRT loads
       if: runner.os == 'Windows'
       shell: pwsh
