@@ -558,28 +558,60 @@ jobs:
         \ previewAcknowledged = false;\nlet previewAcknowledgedOnFirstLaunch = false;\nconst sleep = ms => new Promise(r =>\
         \ setTimeout(r, ms));\nconst canonical = p => { const resolved = fs.realpathSync.native(path.resolve(p)); return process.platform\
         \ === 'win32' ? resolved.toLowerCase() : resolved; };\nfunction record(name, details = {}) { report.tests.push({ name,\
-        \ passed: true, ...details }); }\nasync function until(fn, description, timeout = 120000) {\n  const deadline = Date.now()\
-        \ + timeout;\n  while (Date.now() < deadline) { const value = await fn(); if (value) return value; await sleep(250);\
-        \ }\n  throw Error(`Timeout: ${description}`);\n}\nasync function launch() {\n  launchNumber++;\n  app = await _electron.launch({\
-        \ executablePath: executable, args: [`--user-data-dir=${userData}`, '--lang=en-US'], env, timeout: 120000 });\n  const\
-        \ identity = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, name: app.getName(), version: app.getVersion(),\
-        \ execPath: process.execPath, userData: app.getPath('userData'), nodeMode: process.env.ELECTRON_RUN_AS_NODE || '',\
-        \ home: process.env.DSH_HOME }));\n  assert.equal(identity.packaged, true, 'Must launch packaged Electron app, not\
-        \ development shell');\n  assert.match(identity.name, /deepseek|dsh-desktop/i, 'Unexpected desktop app identity');\n\
-        \  assert.equal(canonical(identity.execPath), canonical(executable), 'Wrong executable');\n  assert.equal(canonical(identity.userData),\
-        \ canonical(userData), 'userData isolation failed');\n  assert.equal(canonical(identity.home), canonical(dshHome),\
-        \ 'DSH_HOME isolation failed');\n  assert.equal(identity.nodeMode, '', 'Electron must not run as Node');\n  await\
-        \ app.evaluate(({ session }) => {\n    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {\n\
-        \      let allowed = false;\n      try { const u = new URL(details.url); allowed = ['file:', 'dsh-app:', 'devtools:',\
-        \ 'data:', 'blob:'].includes(u.protocol) || (['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol) && ['127.0.0.1',\
-        \ 'localhost', '[::1]'].includes(u.hostname)); } catch {}\n      callback({ cancel: !allowed });\n    });\n  });\n\
-        \  record('packaged-native-identity', { name: identity.name, version: identity.version });\n  return identity;\n}\n\
-        async function workspace() {\n  let clickedKey = false, clickedSkip = false;\n  let firstWorkspaceSeenAt = 0;\n  return\
-        \ until(async () => {\n    for (const page of app.windows()) {\n      if (page.isClosed()) continue;\n      // Welcome\
-        \ is a real shipped local document. Never enter or synthesize credentials.\n      if (/\\/welcome\\.html(?:$|[?#])/.test(page.url()))\
-        \ {\n        if (!clickedKey && await page.locator('#api-key').isVisible().catch(() => false)) { await page.locator('#api-key').click();\
-        \ clickedKey = true; }\n        if (!clickedSkip && await page.locator('#skip-key').isVisible().catch(() => false))\
-        \ { await page.locator('#skip-key').click(); clickedSkip = true; }\n      }\n      if (page.url().startsWith('dsh-app://app/'))\
+        \ passed: true, ...details }); }\n// Failure diagnostics are limited to the isolated synthetic QA session, never raw\
+        \ logs/profiles.\nconst pageErrors = [];\nconst watchedPages = new WeakSet();\nfunction safeText(value) {\n  return\
+        \ String(value).replaceAll(root, '<isolated-qa-root>').replaceAll(executable, '<packaged-executable>')\n    .replace(/(?:https?|wss?|file|dsh-app):\\\
+        /\\/[^\\s\"'<>]+/gi, '<url-redacted>')\n    .replace(/(?:Bearer\\s+|(?:token|api[-_ ]?key|password|secret|authorization)\\\
+        s*[:=]\\s*)[^\\s,;]+/gi, '<credential-redacted>')\n    .replace(/[A-Za-z0-9_+/=-]{24,}/g, '<opaque-value-redacted>').slice(0,\
+        \ 6000);\n}\nfunction safeLocation(value) {\n  try {\n    const u = new URL(value);\n    // No authority, query, fragment,\
+        \ user info, or absolute local machine path.\n    const pathname = u.protocol === 'file:' ? '/' + u.pathname.split('/').pop()\
+        \ : u.pathname;\n    return { protocol: u.protocol, path: safeText(pathname) };\n  } catch { return { protocol: 'unknown',\
+        \ path: '<unavailable>' }; }\n}\nfunction watchPage(page) {\n  if (watchedPages.has(page)) return;\n  watchedPages.add(page);\n\
+        \  page.on('pageerror', error => {\n    if (pageErrors.length < 40) pageErrors.push({ launch: launchNumber, location:\
+        \ safeLocation(page.url()), message: safeText(error.message) });\n  });\n}\nasync function failureDiagnostics() {\n\
+        \  report.failureDiagnostics = { launch: launchNumber, pageErrors, windows: [] };\n  if (!app) return;\n  let index\
+        \ = 0;\n  for (const page of app.windows()) {\n    const entry = { index: index++, location: safeLocation(page.url()),\
+        \ closed: page.isClosed() };\n    report.failureDiagnostics.windows.push(entry);\n    if (entry.closed) continue;\n\
+        \    try {\n      const native = await app.browserWindow(page);\n      Object.assign(entry, await native.evaluate(window\
+        \ => ({ visible: window.isVisible(), minimized: window.isMinimized(), focused: window.isFocused() })));\n      entry.title\
+        \ = safeText(await page.title());\n      entry.dom = await page.evaluate(() => ({ readyState: document.readyState,\
+        \ rootInert: Boolean(document.getElementById('root')?.inert), composerCount: document.querySelectorAll('[data-composer-input][contenteditable=\"\
+        true\"]').length, welcomeKey: Boolean(document.querySelector('#api-key')), welcomeSkip: Boolean(document.querySelector('#skip-key'))\
+        \ }));\n      // Extract only text nodes, never input values, attributes, cookies or storage.\n      entry.body =\
+        \ safeText(await page.locator('body').innerText({ timeout: 5000 }));\n      if (entry.visible) {\n        // Failure-only\
+        \ screenshot redaction. Restore text afterwards; no application gate is changed.\n        const changes = await page.evaluateHandle(()\
+        \ => {\n          const changes = [];\n          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);\n\
+        \          let node;\n          while ((node = walker.nextNode())) {\n            const original = node.nodeValue\
+        \ || '';\n            const next = original.replace(/(?:https?|wss?|file|dsh-app):\\/\\/[^\\s\"'<>]+/gi, '<url-redacted>').replace(/(?:Bearer\\\
+        s+|(?:token|api[-_ ]?key|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+/gi, '<credential-redacted>').replace(/[A-Za-z0-9_+/=-]{24,}/g,\
+        \ '<opaque-value-redacted>');\n            if (next !== original) { changes.push([node, original]); node.nodeValue\
+        \ = next; }\n          }\n          return changes;\n        });\n        try {\n          entry.screenshot = `desktop-failure-${launchNumber}-${entry.index}.png`;\n\
+        \          await page.screenshot({ path: path.join(output, entry.screenshot), timeout: 10000, mask: [page.locator('input,\
+        \ textarea, [contenteditable], pre, code, canvas, img, svg')] });\n        } finally { await changes.evaluate(changes\
+        \ => { for (const [node, text] of changes) node.nodeValue = text; }).catch(() => {}); await changes.dispose(); }\n\
+        \      }\n    } catch (error) { entry.diagnosticError = safeText(error.message || error); }\n  }\n}\nasync function\
+        \ until(fn, description, timeout = 120000) {\n  const deadline = Date.now() + timeout;\n  while (Date.now() < deadline)\
+        \ { const value = await fn(); if (value) return value; await sleep(250); }\n  throw Error(`Timeout: ${description}`);\n\
+        }\nasync function launch() {\n  launchNumber++;\n  app = await _electron.launch({ executablePath: executable, args:\
+        \ [`--user-data-dir=${userData}`, '--lang=en-US'], env, timeout: 120000 });\n  app.on('window', watchPage);\n  for\
+        \ (const page of app.windows()) watchPage(page);\n  const identity = await app.evaluate(({ app }) => ({ packaged:\
+        \ app.isPackaged, name: app.getName(), version: app.getVersion(), execPath: process.execPath, userData: app.getPath('userData'),\
+        \ nodeMode: process.env.ELECTRON_RUN_AS_NODE || '', home: process.env.DSH_HOME }));\n  assert.equal(identity.packaged,\
+        \ true, 'Must launch packaged Electron app, not development shell');\n  assert.match(identity.name, /deepseek|dsh-desktop/i,\
+        \ 'Unexpected desktop app identity');\n  assert.equal(canonical(identity.execPath), canonical(executable), 'Wrong\
+        \ executable');\n  assert.equal(canonical(identity.userData), canonical(userData), 'userData isolation failed');\n\
+        \  assert.equal(canonical(identity.home), canonical(dshHome), 'DSH_HOME isolation failed');\n  assert.equal(identity.nodeMode,\
+        \ '', 'Electron must not run as Node');\n  await app.evaluate(({ session }) => {\n    session.defaultSession.webRequest.onBeforeRequest((details,\
+        \ callback) => {\n      let allowed = false;\n      try { const u = new URL(details.url); allowed = ['file:', 'dsh-app:',\
+        \ 'devtools:', 'data:', 'blob:'].includes(u.protocol) || (['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol)\
+        \ && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)); } catch {}\n      callback({ cancel: !allowed });\n\
+        \    });\n  });\n  record('packaged-native-identity', { name: identity.name, version: identity.version });\n  return\
+        \ identity;\n}\nasync function workspace() {\n  let clickedKey = false, clickedSkip = false;\n  let firstWorkspaceSeenAt\
+        \ = 0;\n  return until(async () => {\n    for (const page of app.windows()) {\n      if (page.isClosed()) continue;\n\
+        \      // Welcome is a real shipped local document. Never enter or synthesize credentials.\n      if (/\\/welcome\\\
+        .html(?:$|[?#])/.test(page.url())) {\n        if (!clickedKey && await page.locator('#api-key').isVisible().catch(()\
+        \ => false)) { await page.locator('#api-key').click(); clickedKey = true; }\n        if (!clickedSkip && await page.locator('#skip-key').isVisible().catch(()\
+        \ => false)) { await page.locator('#skip-key').click(); clickedSkip = true; }\n      }\n      if (page.url().startsWith('dsh-app://app/'))\
         \ {\n        if (!firstWorkspaceSeenAt) firstWorkspaceSeenAt = Date.now();\n        const notice = page.getByRole('dialog').filter({\
         \ has: page.getByRole('heading', { name: /^(Preview Notice|\u9884\u89C8\u7248\u8BF4\u660E)$/ }) });\n        if (await\
         \ notice.isVisible().catch(() => false)) {\n          assert.ok(!(launchNumber > 1 && previewAcknowledged), 'Preview\
@@ -622,13 +654,14 @@ jobs:
         \    record('same-profile-restart-storage');\n    if (previewAcknowledgedOnFirstLaunch) record('preview-notice-acknowledgement-persisted');\n\
         \    await editAndClear(page, 2);\n    captureCRT(app.process().pid, 2);\n    await close();\n    report.passed =\
         \ true;\n  } catch (error) {\n    // Do not dump arbitrary app logs or URLs containing tokens. Screenshots contain\
-        \ synthetic QA only.\n    report.error = String(error.message || error).replaceAll(root, '<isolated-qa-root>').replaceAll(executable,\
-        \ '<packaged-executable>');\n    process.exitCode = 1;\n    try { await close(); } catch { report.cleanupError = 'Application\
-        \ failed graceful close; runner must terminate only this QA process tree.'; }\n  } finally {\n    report.completedAt\
-        \ = new Date().toISOString();\n    fs.writeFileSync(path.join(output, 'desktop-qa.json'), JSON.stringify(report, null,\
-        \ 2) + '\\n');\n    // Keep isolated profile local for diagnosis; NEVER upload it (may contain generated local auth/session\
-        \ state).\n    console.log(JSON.stringify({ passed: report.passed, tests: report.tests.length, report: path.join(output,\
-        \ 'desktop-qa.json') }));\n  }\n})();\n\nJS\n"
+        \ synthetic QA only.\n    report.error = safeText(error.message || error);\n    try { await failureDiagnostics();\
+        \ } catch (diagnosticError) { report.diagnosticError = safeText(diagnosticError.message || diagnosticError); }\n \
+        \   process.exitCode = 1;\n    try { await close(); } catch { report.cleanupError = 'Application failed graceful close;\
+        \ runner must terminate only this QA process tree.'; }\n  } finally {\n    report.completedAt = new Date().toISOString();\n\
+        \    fs.writeFileSync(path.join(output, 'desktop-qa.json'), JSON.stringify(report, null, 2) + '\\n');\n    // Keep\
+        \ isolated profile local for diagnosis; NEVER upload it (may contain generated local auth/session state).\n    console.log(JSON.stringify({\
+        \ passed: report.passed, tests: report.tests.length, report: path.join(output, 'desktop-qa.json') }));\n  }\n})();\n\
+        \nJS\n"
     - name: Install exact Windows EXE, launch native UI twice and uninstall
       if: runner.os == 'Windows'
       shell: pwsh
