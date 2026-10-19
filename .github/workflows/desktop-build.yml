@@ -128,12 +128,13 @@ jobs:
         \  source_machines.append({'architecture':source_arch,'file':source_file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(source_file.read_bytes()).hexdigest()})\n\
         evidence=workspace/'desktop-qa-results';evidence.mkdir(exist_ok=True)\n(evidence/'crt-source-machines.json').write_text(json.dumps({'sources':source_machines,'destinations':{p.relative_to(root).as_posix():a\
         \ for p,a in destinations.items()}},indent=2))\narm64_receipt=None\nif 'arm64' in destinations.values():\n arm_dirs={p.relative_to(root).as_posix()\
-        \ for p,a in destinations.items() if a=='arm64'}\n if arm_dirs!={'dependencies/pnpm/dist/node_modules/@reflink/reflink-win32-arm64-msvc'}:raise\
-        \ RuntimeError('Unexpected ARM64 payload destinations')\n subprocess.run([sys.executable,str(workspace/'verify-arm64-crt.py'),str(root),str(sources['arm64'])],check=True,timeout=120)\n\
+        \ for p,a in destinations.items() if a=='arm64'}\n expected_arm_dir='dependencies/pnpm/dist/node_modules/@reflink/reflink-win32-arm64-msvc'\
+        \ if (root/'dependencies/pnpm').is_dir() else 'node_modules/node-pty/third_party/conpty/1.25.260303002/win10-arm64'\n\
+        \ if arm_dirs!={expected_arm_dir}:raise RuntimeError('Unexpected ARM64 payload destinations')\n subprocess.run([sys.executable,str(workspace/'verify-arm64-crt.py'),str(root),str(sources['arm64'])],check=True,timeout=120)\n\
         \ arm64_receipt=json.loads((root/'verified-arm64-crt.json').read_text())\n if arm64_receipt.get('verified') is not\
         \ True:raise RuntimeError('ARM64 closure not verified')\n excluded=sources['arm64']/arm64_receipt['excludedFile']\n\
         \ if hashlib.sha256(excluded.read_bytes()).hexdigest()!=arm64_receipt['excludedSha256']:raise RuntimeError('Companion\
-        \ changed after verification')\n files['arm64']=[p for p in files['arm64'] if p!=excluded]\n (evidence/'verified-arm64-crt.json').write_text(json.dumps(arm64_receipt,indent=2))\n\
+        \ changed after verification')\n files['arm64']=[p for p in files['arm64'] if p!=excluded]\n (evidence/('verified-arm64-crt-'+root.name+'.json')).write_text(json.dumps(arm64_receipt,indent=2))\n\
         for destination,arch in destinations.items():\n for file in files[arch]:\n  pe=pefile.PE(str(file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;actual=machines.get(source_machine);pe.close()\n\
         \  if actual!=arch:\n   pe=pefile.PE(str(file));load=getattr(getattr(pe,'DIRECTORY_ENTRY_LOAD_CONFIG',None),'struct',None)\n\
         \   details={'architecture':arch,'file':file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(file.read_bytes()).hexdigest(),'loadConfig':load.dump()\
@@ -413,26 +414,38 @@ jobs:
         \ not in str(source).lower(),'release source location')\ncompanion=source/excluded;require(companion.is_file() and\
         \ digest(companion)==excluded_hash,'exact excluded companion')\np=pefile.PE(str(companion));require(p.FILE_HEADER.Machine==0x8664,'companion\
         \ machine');load=getattr(getattr(p,'DIRECTORY_ENTRY_LOAD_CONFIG',None),'struct',None);require(load is not None and\
-        \ getattr(load,'CHPEMetadataPointer',0)!=0,'companion CHPE identity');p.close()\nconsumer=root/consumer_rel;require(consumer.is_file()\
-        \ and consumer.resolve().is_relative_to(root) and digest(consumer)==consumer_hash,'exact consumer')\nsource_files={p.name.lower():p\
+        \ getattr(load,'CHPEMetadataPointer',0)!=0,'companion CHPE identity');p.close()\nconpty_dir='node_modules/node-pty/third_party/conpty/1.25.260303002/win10-arm64'\n\
+        conpty_consumers={\n conpty_dir+'/conpty.dll':'b3a9f975c51d5b9b96d290bf784e990e3f85203b063c21614457353f566266ff',\n\
+        \ conpty_dir+'/OpenConsole.exe':'7fa560be0c9b6c81db5d1b855a4a6e0f3ee5a2ea75d36eebb3ae44443b8d4866',\n}\nprimary_present=(root/consumer_rel).is_file();conpty_present=(root/conpty_dir).is_dir()\n\
+        require(primary_present != conpty_present,'one exact supported root mode')\nmode='primary-reflink' if primary_present\
+        \ else 'dsh-conpty'\nconsumer_specs={consumer_rel:consumer_hash} if primary_present else conpty_consumers\nif conpty_present:\n\
+        \ require({p.name for p in (root/conpty_dir).iterdir() if p.is_file()}=={'conpty.dll','OpenConsole.exe'},'exact ConPTY\
+        \ directory files before CRT placement')\n package=json.loads((root/'node_modules/node-pty/package.json').read_text())\n\
+        \ require(package.get('name')=='node-pty' and package.get('version')=='1.2.0-beta.15','node-pty identity')\nconsumer_files=[]\n\
+        for relative,expected in consumer_specs.items():\n consumer=root/relative;require(consumer.is_file() and consumer.resolve().is_relative_to(root)\
+        \ and digest(consumer)==expected,'exact consumer '+relative);consumer_files.append(consumer)\nsource_files={p.name.lower():p\
         \ for p in source.glob('*.dll')};require(len(source_files)==len(list(source.glob('*.dll'))),'unique source names')\n\
         # Only Windows platform contracts, not generic arbitrary DLL basenames.\nos_dlls={'kernel32.dll','kernelbase.dll','ntdll.dll','advapi32.dll','bcryptprimitives.dll','bcrypt.dll','oleaut32.dll','ole32.dll','combase.dll','rpcrt4.dll','user32.dll','version.dll','ucrtbase.dll'}\n\
-        def system(name):\n return name in os_dlls or name.startswith(('api-ms-win-core-','api-ms-win-crt-'))\nqueue=[consumer]+[p\
-        \ for name,p in source_files.items() if name!=excluded];seen=set();graph=[]\nwhile queue:\n f=queue.pop(0).resolve()\n\
-        \ if f in seen:continue\n seen.add(f);is_source=f.parent==source\n require(is_source or f.is_relative_to(root),'private\
-        \ dependency containment')\n label='source/arm64/'+f.name if is_source else f.relative_to(root).as_posix()\n pe=pefile.PE(str(f));require(pe.FILE_HEADER.Machine==0xaa64,label+'\
-        \ native ARM64 machine')\n edges=[]\n for key in ('DIRECTORY_ENTRY_IMPORT','DIRECTORY_ENTRY_DELAY_IMPORT'):\n  for\
-        \ imp in getattr(pe,key,[]):edges.append({'name':imp.dll.decode('ascii').lower(),'kind':'delay' if key.endswith('DELAY_IMPORT')\
-        \ else 'import'})\n for exp in getattr(getattr(pe,'DIRECTORY_ENTRY_EXPORT',None),'symbols',[]):\n  if exp.forwarder:\n\
-        \   forward=exp.forwarder.decode('ascii');module=forward.rsplit('.',1)[0].lower();module=module if module.endswith('.dll')\
-        \ else module+'.dll';edges.append({'name':module,'kind':'forwarder'})\n pe.close()\n for edge in edges:\n  name=edge['name'];require(name!=excluded,label+'\
-        \ references excluded companion')\n  if system(name):edge['resolution']='Windows OS contract';continue\n  # Source\
-        \ files will be copied together beside the consumer; preserve this lookup scope.\n  choices=[]\n  if name in source_files:choices.append(source_files[name].resolve())\n\
-        \  local=f.parent/name\n  if local.is_file() and local.resolve() not in choices:choices.append(local.resolve())\n\
-        \  require(len(choices)==1,label+' unresolved or ambiguous private dependency '+name)\n  target=choices[0];require(target!=companion.resolve(),label+'\
+        def system(name):\n return name in os_dlls or name.startswith(('api-ms-win-core-','api-ms-win-crt-'))\nif mode=='dsh-conpty':\n\
+        \ os_dlls.update({'propsys.dll','gdi32.dll','shell32.dll','winmm.dll','imm32.dll','usp10.dll','d2d1.dll','dwrite.dll','dxgi.dll','d3d11.dll','d3dcompiler_47.dll','icu.dll','api-ms-win-eventing-provider-l1-1-0.dll','ext-ms-win-uiacore-l1-1-0.dll','ext-ms-win-uiacore-l1-1-1.dll','api-ms-win-shcore-scaling-l1-1-1.dll','api-ms-win-ntuser-sysparams-l1-1-0.dll','api-ms-win-shell-namespace-l1-1-0.dll','api-ms-win-shcore-obsolete-l1-1-0.dll'})\n\
+        queue=consumer_files+[p for name,p in source_files.items() if name!=excluded];seen=set();graph=[]\nwhile queue:\n\
+        \ f=queue.pop(0).resolve()\n if f in seen:continue\n seen.add(f);is_source=f.parent==source\n require(is_source or\
+        \ f.is_relative_to(root),'private dependency containment')\n label='source/arm64/'+f.name if is_source else f.relative_to(root).as_posix()\n\
+        \ pe=pefile.PE(str(f));require(pe.FILE_HEADER.Machine==0xaa64,label+' native ARM64 machine')\n edges=[]\n for key\
+        \ in ('DIRECTORY_ENTRY_IMPORT','DIRECTORY_ENTRY_DELAY_IMPORT'):\n  for imp in getattr(pe,key,[]):edges.append({'name':imp.dll.decode('ascii').lower(),'kind':'delay'\
+        \ if key.endswith('DELAY_IMPORT') else 'import'})\n for exp in getattr(getattr(pe,'DIRECTORY_ENTRY_EXPORT',None),'symbols',[]):\n\
+        \  if exp.forwarder:\n   forward=exp.forwarder.decode('ascii');module=forward.rsplit('.',1)[0].lower();module=module\
+        \ if module.endswith('.dll') else module+'.dll';edges.append({'name':module,'kind':'forwarder'})\n pe.close()\n for\
+        \ edge in edges:\n  name=edge['name'];require(name!=excluded,label+' references excluded companion')\n  if system(name):edge['resolution']='Windows\
+        \ OS contract';continue\n  # Source files will be copied together beside the consumer; preserve this lookup scope.\n\
+        \  choices=[]\n  if name in source_files:choices.append(source_files[name].resolve())\n  local=f.parent/name\n  if\
+        \ local.is_file() and local.resolve() not in choices:choices.append(local.resolve())\n  require(len(choices)==1,label+'\
+        \ unresolved or ambiguous private dependency '+name)\n  target=choices[0];require(target!=companion.resolve(),label+'\
         \ resolves excluded companion')\n  edge['resolution']='source/arm64/'+target.name if target.parent==source else target.relative_to(root).as_posix();queue.append(target)\n\
-        \ graph.append({'path':label,'sha256':digest(f),'machine':'0xaa64','edges':edges})\nreceipt={'schema':1,'verified':True,'excludedFile':excluded,'excludedSha256':excluded_hash,'excludedMachine':'0x8664','consumer':consumer_rel,'consumerSha256':consumer_hash,'graph':graph,'reason':'Exact\
-        \ ARM64EC companion is not imported, delay-imported, or export-forwarded by pinned native ARM64 consumer and every\
+        \ graph.append({'path':label,'sha256':digest(f),'machine':'0xaa64','edges':edges})\nreceipt={'schema':1,'verified':True,'excludedFile':excluded,'excludedSha256':excluded_hash,'excludedMachine':'0x8664','mode':mode,'consumers':[{'path':p,'sha256':h}\
+        \ for p,h in consumer_specs.items()],'graph':graph,'consumerSource':('https://registry.npmjs.org/pnpm/-/pnpm-11.28.5.tgz'\
+        \ if mode=='primary-reflink' else 'https://registry.npmjs.org/node-pty/-/node-pty-1.2.0-beta.15.tgz'),'reason':'Exact\
+        \ ARM64EC companion is not imported, delay-imported, or export-forwarded by pinned native ARM64 consumers and every\
         \ retained CRT source.','nativeArmRuntimeTested':False,'signaturePrerequisite':'Caller must verify Microsoft Authenticode\
         \ for all release source DLLs before this helper.'}\n(root/'verified-arm64-crt.json').write_text(json.dumps(receipt,indent=2)+'\\\
         n',encoding='utf8')\nprint(json.dumps({'verified':True,'graphNodes':len(graph),'excludedFile':excluded,'nativeArmRuntimeTested':False}))\n\
