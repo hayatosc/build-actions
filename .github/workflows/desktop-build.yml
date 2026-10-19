@@ -124,8 +124,14 @@ jobs:
         source_machines=[]\nfor source_arch,group in files.items():\n for source_file in group:\n  pe=pefile.PE(str(source_file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;pe.close()\n\
         \  source_machines.append({'architecture':source_arch,'file':source_file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(source_file.read_bytes()).hexdigest()})\n\
         evidence=workspace/'desktop-qa-results';evidence.mkdir(exist_ok=True)\n(evidence/'crt-source-machines.json').write_text(json.dumps({'sources':source_machines,'destinations':{p.relative_to(root).as_posix():a\
-        \ for p,a in destinations.items()}},indent=2))\nfor destination,arch in destinations.items():\n for file in files[arch]:\n\
-        \  pe=pefile.PE(str(file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;actual=machines.get(source_machine);pe.close()\n\
+        \ for p,a in destinations.items()}},indent=2))\narm64_receipt=None\nif 'arm64' in destinations.values():\n arm_dirs={p.relative_to(root).as_posix()\
+        \ for p,a in destinations.items() if a=='arm64'}\n if arm_dirs!={'dependencies/pnpm/dist/node_modules/@reflink/reflink-win32-arm64-msvc'}:raise\
+        \ RuntimeError('Unexpected ARM64 payload destinations')\n subprocess.run([sys.executable,str(workspace/'verify-arm64-crt.py'),str(root),str(sources['arm64'])],check=True,timeout=120)\n\
+        \ arm64_receipt=json.loads((root/'verified-arm64-crt.json').read_text())\n if arm64_receipt.get('verified') is not\
+        \ True:raise RuntimeError('ARM64 closure not verified')\n excluded=sources['arm64']/arm64_receipt['excludedFile']\n\
+        \ if hashlib.sha256(excluded.read_bytes()).hexdigest()!=arm64_receipt['excludedSha256']:raise RuntimeError('Companion\
+        \ changed after verification')\n files['arm64']=[p for p in files['arm64'] if p!=excluded]\n (evidence/'verified-arm64-crt.json').write_text(json.dumps(arm64_receipt,indent=2))\n\
+        for destination,arch in destinations.items():\n for file in files[arch]:\n  pe=pefile.PE(str(file),fast_load=True);source_machine=pe.FILE_HEADER.Machine;actual=machines.get(source_machine);pe.close()\n\
         \  if actual!=arch:\n   pe=pefile.PE(str(file));load=getattr(getattr(pe,'DIRECTORY_ENTRY_LOAD_CONFIG',None),'struct',None)\n\
         \   details={'architecture':arch,'file':file.name,'machine':hex(source_machine),'sha256':hashlib.sha256(file.read_bytes()).hexdigest(),'loadConfig':load.dump()\
         \ if load else None};pe.close()\n   vs=next((p for p in source.parents if (p/'VC/Tools/MSVC').is_dir()),None)\n  \
@@ -146,7 +152,7 @@ jobs:
         \ (evidence/'distlib-runtime.json').write_text(json.dumps(proof,indent=2))\n (evidence/'verified-distlib.json').write_text(json.dumps(distlib_receipt,indent=2))\n\
         sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()\nrecord={'source':'Visual Studio licensed GitHub hosted runner\
         \ VC/Redist/MSVC/'+source.parent.parent.name,'redistribution':'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution','files':{arch:{p.name:sha(p)\
-        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'staticHelpers':static_helpers,'distlibTemplates':distlib_receipt,'nonWindowsAssets':non_windows_assets,'destinations':{str(p.relative_to(root)):arch\
+        \ for p in group} for arch,group in files.items() if arch in destinations.values()},'consumers':consumers,'staticHelpers':static_helpers,'distlibTemplates':distlib_receipt,'arm64Closure':arm64_receipt,'nonWindowsAssets':non_windows_assets,'destinations':{str(p.relative_to(root)):arch\
         \ for p,arch in destinations.items()}}\n(root/'app-local-crt.json').write_text(json.dumps(record,indent=2))\n(root/'MICROSOFT-CRT-NOTICE.txt').write_text('Microsoft\
         \ Visual C++ release runtime. Copyright Microsoft Corporation. Unmodified REDIST files from licensed Visual Studio\
         \ on GitHub hosted runners.\\nRedistribution conditions: https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution\\\
@@ -385,7 +391,40 @@ jobs:
         ,\n  \"launcherSource\": \"https://raw.githubusercontent.com/pypa/distlib/0.4.2/PC/launcher.c\",\n  \"selector\":\
         \ {\n    \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/scripts.py\",\n    \"sha256\": \"ad59b803e61f1900e9b0e4703b2ec0c1ea724536b2bb2eab73e32768230101c3\"\
         \n  },\n  \"license\": {\n    \"path\": \"dependencies/python/Lib/site-packages/pip/_vendor/distlib/LICENSE.txt\"\
-        ,\n    \"sha256\": \"808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d\"\n  }\n}\n\nDISTJSON\n"
+        ,\n    \"sha256\": \"808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d\"\n  }\n}\n\nDISTJSON\ncat >\
+        \ verify-arm64-crt.py <<'PYARMVERIFY'\n\"\"\"Prove pinned ARM64 payload has no static edge to an ARM64EC-only CRT\
+        \ companion.\"\"\"\nimport hashlib,json,pathlib,sys\nimport pefile\nroot=pathlib.Path(sys.argv[1]).resolve();source=pathlib.Path(sys.argv[2]).resolve()\n\
+        excluded='vcruntime140_1.dll';excluded_hash='42b5f76f1f0ae03c93fc4c107adf83c5f14e86032474860032cfe672d0836546'\nconsumer_rel='dependencies/pnpm/dist/node_modules/@reflink/reflink-win32-arm64-msvc/reflink.win32-arm64-msvc.node'\n\
+        consumer_hash='b7c3fe5620ead8872593acd949fac7bb4d860ec015e320f7e117260fa3b12d96'\ndef require(ok,label):\n if not\
+        \ ok:raise RuntimeError('ARM64 CRT closure verification failed: '+label)\ndef digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()\n\
+        require(source.name=='Microsoft.VC143.CRT' and source.parent.name=='arm64' and 'Redist' in source.parts and 'debug_nonredist'\
+        \ not in str(source).lower(),'release source location')\ncompanion=source/excluded;require(companion.is_file() and\
+        \ digest(companion)==excluded_hash,'exact excluded companion')\np=pefile.PE(str(companion));require(p.FILE_HEADER.Machine==0x8664,'companion\
+        \ machine');load=getattr(getattr(p,'DIRECTORY_ENTRY_LOAD_CONFIG',None),'struct',None);require(load is not None and\
+        \ getattr(load,'CHPEMetadataPointer',0)!=0,'companion CHPE identity');p.close()\nconsumer=root/consumer_rel;require(consumer.is_file()\
+        \ and consumer.resolve().is_relative_to(root) and digest(consumer)==consumer_hash,'exact consumer')\nsource_files={p.name.lower():p\
+        \ for p in source.glob('*.dll')};require(len(source_files)==len(list(source.glob('*.dll'))),'unique source names')\n\
+        # Only Windows platform contracts, not generic arbitrary DLL basenames.\nos_dlls={'kernel32.dll','kernelbase.dll','ntdll.dll','advapi32.dll','bcryptprimitives.dll','bcrypt.dll','oleaut32.dll','ole32.dll','combase.dll','rpcrt4.dll','user32.dll','version.dll','ucrtbase.dll'}\n\
+        def system(name):\n return name in os_dlls or name.startswith(('api-ms-win-core-','api-ms-win-crt-'))\nqueue=[consumer]+[p\
+        \ for name,p in source_files.items() if name!=excluded];seen=set();graph=[]\nwhile queue:\n f=queue.pop(0).resolve()\n\
+        \ if f in seen:continue\n seen.add(f);is_source=f.parent==source\n require(is_source or f.is_relative_to(root),'private\
+        \ dependency containment')\n label='source/arm64/'+f.name if is_source else f.relative_to(root).as_posix()\n pe=pefile.PE(str(f));require(pe.FILE_HEADER.Machine==0xaa64,label+'\
+        \ native ARM64 machine')\n edges=[]\n for key in ('DIRECTORY_ENTRY_IMPORT','DIRECTORY_ENTRY_DELAY_IMPORT'):\n  for\
+        \ imp in getattr(pe,key,[]):edges.append({'name':imp.dll.decode('ascii').lower(),'kind':'delay' if key.endswith('DELAY_IMPORT')\
+        \ else 'import'})\n for exp in getattr(getattr(pe,'DIRECTORY_ENTRY_EXPORT',None),'symbols',[]):\n  if exp.forwarder:\n\
+        \   forward=exp.forwarder.decode('ascii');module=forward.rsplit('.',1)[0].lower();module=module if module.endswith('.dll')\
+        \ else module+'.dll';edges.append({'name':module,'kind':'forwarder'})\n pe.close()\n for edge in edges:\n  name=edge['name'];require(name!=excluded,label+'\
+        \ references excluded companion')\n  if system(name):edge['resolution']='Windows OS contract';continue\n  # Source\
+        \ files will be copied together beside the consumer; preserve this lookup scope.\n  choices=[]\n  if name in source_files:choices.append(source_files[name].resolve())\n\
+        \  local=f.parent/name\n  if local.is_file() and local.resolve() not in choices:choices.append(local.resolve())\n\
+        \  require(len(choices)==1,label+' unresolved or ambiguous private dependency '+name)\n  target=choices[0];require(target!=companion.resolve(),label+'\
+        \ resolves excluded companion')\n  edge['resolution']='source/arm64/'+target.name if target.parent==source else target.relative_to(root).as_posix();queue.append(target)\n\
+        \ graph.append({'path':label,'sha256':digest(f),'machine':'0xaa64','edges':edges})\nreceipt={'schema':1,'verified':True,'excludedFile':excluded,'excludedSha256':excluded_hash,'excludedMachine':'0x8664','consumer':consumer_rel,'consumerSha256':consumer_hash,'graph':graph,'reason':'Exact\
+        \ ARM64EC companion is not imported, delay-imported, or export-forwarded by pinned native ARM64 consumer and every\
+        \ retained CRT source.','nativeArmRuntimeTested':False,'signaturePrerequisite':'Caller must verify Microsoft Authenticode\
+        \ for all release source DLLs before this helper.'}\n(root/'verified-arm64-crt.json').write_text(json.dumps(receipt,indent=2)+'\\\
+        n',encoding='utf8')\nprint(json.dumps({'verified':True,'graphNodes':len(graph),'excludedFile':excluded,'nativeArmRuntimeTested':False}))\n\
+        \nPYARMVERIFY\n"
     - name: Observe actual Office helper CRT loads
       if: runner.os == 'Windows'
       shell: pwsh
