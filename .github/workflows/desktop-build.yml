@@ -135,7 +135,7 @@ jobs:
         import json\nexpected={\n 'packages/api/workspace-git':'@deepseek-ai/dsh-api-workspace-git',\n 'packages/client/ui-git-branch':'@deepseek-ai/dsh-client-ui-git-branch',\n\
         \ 'packages/client/locale-ja':'@deepseek-ai/dsh-client-locale-ja',\n 'packages/web/web-search-ollama':'@deepseek-ai/dsh-web-search-ollama',\n\
         }\nversion=json.loads(Path('package.json').read_text())['version'];assert version=='0.2.1-rc.2'\nassert json.loads(Path('apps/desktop/package.json').read_text())['version']==version\n\
-        manifests=list(Path('.').glob('packages/*/*/package.json'))+list(Path('.').glob('apps/*/package.json'))\nstale={str(p.parent):p\
+        manifests=list(Path('.').glob('packages/*/*/package.json'))+list(Path('.').glob('apps/*/package.json'))\nstale={p.parent.as_posix():p\
         \ for p in manifests if json.loads(p.read_text()).get('name','').startswith('@deepseek-ai/') and json.loads(p.read_text()).get('version')!=version}\n\
         assert set(stale)==set(expected),stale\nfor directory,p in stale.items():\n value=json.loads(p.read_text());assert\
         \ value['name']==expected[directory] and value['version']=='0.2.1-alpha.5'\n text=p.read_text();assert text.count('\"\
